@@ -46,6 +46,12 @@ class AppConfig:
     prefs_window_y: int | None = None
     prefs_window_w: int | None = None
     prefs_window_h: int | None = None
+    # Last selected X11 capture rectangle (screen coordinates), restored on startup.
+    last_capture_x: int | None = None
+    last_capture_y: int | None = None
+    last_capture_w: int | None = None
+    last_capture_h: int | None = None
+    last_capture_window_id: int | None = None
 
     @staticmethod
     def config_path() -> Path:

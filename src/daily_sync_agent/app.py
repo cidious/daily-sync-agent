@@ -34,6 +34,7 @@ from daily_sync_agent.capture.ffmpeg import FfmpegPaths, RecordingProcess, build
 from daily_sync_agent.capture.window_x11 import WindowInfo, pick_window_x11
 from daily_sync_agent.icons import icon_idle, icon_recording
 from daily_sync_agent.settings import AppConfig, log_dir, output_dir
+from daily_sync_agent.ui.window_frame_overlay import WindowFrameOverlay
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,8 @@ class TrayApplication(QWidget):
         self._session_dir: Path | None = None
         self._ai_thread: AiThread | None = None
 
+        self._restore_last_capture_from_config()
+
         self._menu = QMenu()
         self._menu.aboutToShow.connect(self._rebuild_menu)
         self._tray.setContextMenu(self._menu)
@@ -145,9 +148,52 @@ class TrayApplication(QWidget):
                 8000,
             )
 
+    def _restore_last_capture_from_config(self) -> None:
+        c = self._config
+        if c.last_capture_x is None or c.last_capture_y is None or c.last_capture_w is None or c.last_capture_h is None:
+            return
+        w, h = c.last_capture_w, c.last_capture_h
+        if w <= 0 or h <= 0:
+            return
+        wid = c.last_capture_window_id if c.last_capture_window_id is not None else 0
+        self._selected_window = WindowInfo(
+            x=c.last_capture_x,
+            y=c.last_capture_y,
+            width=w,
+            height=h,
+            window_id=wid,
+        )
+
+    def _persist_last_capture(self, info: WindowInfo) -> None:
+        self._config.last_capture_x = info.x
+        self._config.last_capture_y = info.y
+        self._config.last_capture_w = info.width
+        self._config.last_capture_h = info.height
+        self._config.last_capture_window_id = info.window_id
+        self._config.save()
+
+    def _show_saved_frame_preview(self) -> None:
+        if self._selected_window is None:
+            self._tray.showMessage(
+                "Capture region",
+                "No window saved yet — use “Select window…” in the tray menu.",
+                QSystemTrayIcon.MessageIcon.Information,
+                5000,
+            )
+            return
+        info = self._selected_window
+        rect = QRect(info.x, info.y, info.width, info.height)
+        for o in self.findChildren(WindowFrameOverlay):
+            o.deleteLater()
+        overlay = WindowFrameOverlay(rect, parent=self)
+        overlay.show_and_expire()
+
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
-        if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            self._menu.popup(self._tray.geometry().bottomLeft())
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self._show_saved_frame_preview()
 
     def _rebuild_menu(self) -> None:
         try:
@@ -253,6 +299,7 @@ class TrayApplication(QWidget):
         info = pick_window_x11()
         if info:
             self._selected_window = info
+            self._persist_last_capture(info)
             self._tray.showMessage("Window", f"Selected {info.width}x{info.height} at ({info.x},{info.y})", QSystemTrayIcon.MessageIcon.Information, 4000)
         self._rebuild_menu()
 
