@@ -3,11 +3,29 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import traceback
 from pathlib import Path
 
 from daily_sync_agent.log_config import setup_logging
+
+
+def _is_wayland_session() -> bool:
+    session_type = os.environ.get("XDG_SESSION_TYPE", "").strip().lower()
+    if session_type == "wayland":
+        return True
+    return bool(os.environ.get("WAYLAND_DISPLAY", "").strip())
+
+
+def _gui_startup_block_reason() -> str | None:
+    if not _is_wayland_session():
+        return None
+    return (
+        "Wayland session detected. The tray GUI requires an X11 session for window capture in this version.\n"
+        "Use `daily-sync-agent process <media>` for headless transcription/summarization, "
+        "or log in to an X11 session for GUI recording."
+    )
 
 
 def _cli_process_media(media: Path, *, debug: bool) -> int:
@@ -39,7 +57,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="X11 window capture with local transcription and summary.",
         epilog="Global options (--debug, --log-file) must appear before the subcommand, e.g. "
-        "daily-sync-agent --debug process ./recording.mkv",
+        "daily-sync-agent --debug process ./recording.mkv. "
+        "Note: Wayland sessions are supported for `process` only; the tray GUI requires X11.",
     )
     parser.add_argument(
         "--debug",
@@ -74,6 +93,11 @@ def main() -> None:
     if args.command == "process":
         setup_logging(debug=args.debug, log_file=args.log_file)
         sys.exit(_cli_process_media(args.media, debug=args.debug))
+
+    block = _gui_startup_block_reason()
+    if block is not None:
+        print(block, file=sys.stderr)
+        sys.exit(2)
 
     # Tray GUI (default, or explicit `gui`)
     from PySide6.QtWidgets import QApplication

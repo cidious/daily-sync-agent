@@ -6,7 +6,7 @@ You can also **process an existing video or audio file** from the command line (
 
 ## Requirements
 
-- **OS / session**: Linux with **X11** (KDE, GNOME, etc.). Wayland is not supported for window capture in this version.
+- **OS / session**: Linux with **X11** (KDE, GNOME, etc.). Wayland is not supported for window capture in this version. If a Wayland session is detected, `daily-sync-agent` / `daily-sync-agent gui` exits early with a clear message; `daily-sync-agent process <media>` still works.
 - **System packages**:
   - `ffmpeg` on `PATH`
   - `pactl` (typically from **pulseaudio-utils** or your distro’s PipeWire Pulse compatibility tools) to list default sinks/sources and device names
