@@ -10,6 +10,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QRect, QThread, Signal
 from PySide6.QtGui import QAction, QActionGroup
+from shiboken6 import isValid
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -30,6 +31,7 @@ from daily_sync_agent.ai.summarize import list_ollama_models
 from daily_sync_agent.ai.whisper_compute import compute_type_choices, pick_compute_index_for_value
 from daily_sync_agent.ai.whisper_models import list_whisper_models_for_combo, normalize_whisper_device
 from daily_sync_agent.audio.devices import AudioDevices, AudioMode, list_devices
+from daily_sync_agent.capture.desktop_clip import clip_window_info_to_visible_desktop
 from daily_sync_agent.capture.ffmpeg import FfmpegPaths, RecordingProcess, build_ffmpeg_command, start_recording
 from daily_sync_agent.capture.window_x11 import WindowInfo, pick_window_x11
 from daily_sync_agent.icons import icon_idle, icon_recording
@@ -73,7 +75,9 @@ def _fill_ollama_model_combo(combo: QComboBox, base_url: str, current_model: str
 
 
 class AiThread(QThread):
-    finished_ok = Signal(object, object)
+    """Emits the session directory so the tray message matches the job (not the latest recording)."""
+
+    finished_ok = Signal(object)
     failed = Signal(str)
 
     def __init__(self, parent: QWidget, audio_path: Path, session_dir: Path, config: AppConfig) -> None:
@@ -87,7 +91,7 @@ class AiThread(QThread):
             logger.debug("AI pipeline start audio=%s session=%s", self._audio_path, self._session_dir)
             t, s = run_transcribe_and_summarize(self._audio_path, self._session_dir, self._config)
             logger.debug("AI pipeline done transcript=%s summary=%s", t, s)
-            self.finished_ok.emit(t, s)
+            self.finished_ok.emit(self._session_dir)
         except Exception:
             logger.exception("AI pipeline failed")
             self.failed.emit(traceback.format_exc())
@@ -120,6 +124,8 @@ class TrayApplication(QWidget):
         self._recording: RecordingProcess | None = None
         self._session_dir: Path | None = None
         self._ai_thread: AiThread | None = None
+        self._ai_queue: list[tuple[Path, Path]] = []
+        self._frame_preview: WindowFrameOverlay | None = None
 
         self._restore_last_capture_from_config()
 
@@ -130,9 +136,28 @@ class TrayApplication(QWidget):
         self._rebuild_menu()
 
     def wait_for_ai_thread(self, timeout_ms: int = 120_000) -> None:
-        """Block until the background AI worker finishes (e.g. on application exit)."""
-        if self._ai_thread is not None and self._ai_thread.isRunning():
-            self._ai_thread.wait(timeout_ms)
+        """Block until the AI worker and queued jobs finish (e.g. on application exit)."""
+        import time
+
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while True:
+            QApplication.processEvents()
+            if self._ai_thread is not None and self._ai_thread.isRunning():
+                self._ai_thread.wait(100)
+            elif self._ai_queue:
+                self._try_start_ai_worker()
+            else:
+                break
+            if time.monotonic() >= deadline:
+                if self._ai_queue or (
+                    self._ai_thread is not None and self._ai_thread.isRunning()
+                ):
+                    logger.warning(
+                        "AI work not fully finished on exit (queue=%s running=%s)",
+                        len(self._ai_queue),
+                        self._ai_thread.isRunning() if self._ai_thread else False,
+                    )
+                break
 
     def show(self) -> None:  # noqa: A003
         self._tray.show()
@@ -183,10 +208,21 @@ class TrayApplication(QWidget):
             return
         info = self._selected_window
         rect = QRect(info.x, info.y, info.width, info.height)
-        for o in self.findChildren(WindowFrameOverlay):
-            o.deleteLater()
-        overlay = WindowFrameOverlay(rect, parent=self)
+        prev = self._frame_preview
+        overlay = WindowFrameOverlay(rect, parent=None)
+        overlay.destroyed.connect(lambda o=overlay: self._on_frame_preview_destroyed(o))
+        self._frame_preview = overlay
         overlay.show_and_expire()
+        # Previous overlay may already be gone (expiry timer); wrapper can outlive the C++ object.
+        if prev is not None and isValid(prev):
+            try:
+                prev.deleteLater()
+            except RuntimeError:
+                pass
+
+    def _on_frame_preview_destroyed(self, overlay: WindowFrameOverlay) -> None:
+        if self._frame_preview is overlay:
+            self._frame_preview = None
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in (
@@ -309,6 +345,14 @@ class TrayApplication(QWidget):
     def _start_recording(self) -> None:
         if self._recording is not None or self._selected_window is None:
             return
+        win = clip_window_info_to_visible_desktop(self._selected_window)
+        if win is None:
+            QMessageBox.warning(
+                None,
+                "Recording",
+                "The selected window is completely outside the visible desktop. Move it on-screen and try again.",
+            )
+            return
         stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         session = output_dir() / stamp
         session.mkdir(parents=True, exist_ok=True)
@@ -316,9 +360,26 @@ class TrayApplication(QWidget):
         video_path = session / "recording.mkv"
         audio_path = session / "recording.flac"
         paths = FfmpegPaths(video_path=video_path, audio_only_path=audio_path)
+        if (
+            win.x != self._selected_window.x
+            or win.y != self._selected_window.y
+            or win.width != self._selected_window.width
+            or win.height != self._selected_window.height
+        ):
+            logger.info(
+                "Clipped capture to visible desktop: %sx%s@%s,%s (was %sx%s@%s,%s)",
+                win.width,
+                win.height,
+                win.x,
+                win.y,
+                self._selected_window.width,
+                self._selected_window.height,
+                self._selected_window.x,
+                self._selected_window.y,
+            )
         try:
             cmd = build_ffmpeg_command(
-                self._selected_window,
+                win,
                 display=self._display_str(),
                 fps=self._config.ffmpeg_fps,
                 mode=self._mode,
@@ -391,27 +452,55 @@ class TrayApplication(QWidget):
                 6000,
             )
 
-        self._tray.showMessage("Processing", "Transcribing and summarizing (local AI)…", QSystemTrayIcon.MessageIcon.Information, 5000)
+        self._enqueue_ai_pipeline(audio_path, session)
+
+    def _enqueue_ai_pipeline(self, audio_path: Path, session: Path) -> None:
+        self._ai_queue.append((audio_path, session))
+        n = len(self._ai_queue)
+        if self._ai_thread is not None and self._ai_thread.isRunning():
+            self._tray.showMessage(
+                "Queued",
+                f"Transcription will start after the current job ({n} in queue).",
+                QSystemTrayIcon.MessageIcon.Information,
+                6000,
+            )
+        self._try_start_ai_worker()
+
+    def _try_start_ai_worker(self) -> None:
+        if self._ai_thread is not None and self._ai_thread.isRunning():
+            return
+        if not self._ai_queue:
+            return
+        audio_path, session = self._ai_queue.pop(0)
+        self._tray.showMessage(
+            "Processing",
+            "Transcribing and summarizing (local AI)…",
+            QSystemTrayIcon.MessageIcon.Information,
+            5000,
+        )
         self._ai_thread = AiThread(self, audio_path, session, self._config)
         self._ai_thread.finished_ok.connect(self._on_ai_ok)
         self._ai_thread.failed.connect(self._on_ai_fail)
         self._ai_thread.start()
         self._rebuild_menu()
 
-    def _on_ai_ok(self, transcript: object, summary: object) -> None:
+    def _on_ai_ok(self, session_dir: object) -> None:
         self._ai_thread = None
+        sd = session_dir if isinstance(session_dir, Path) else Path(session_dir)
         self._tray.showMessage(
             "Done",
-            f"Saved transcript and summary in {self._session_dir}",
+            f"Saved transcript and summary in {sd}",
             QSystemTrayIcon.MessageIcon.Information,
             8000,
         )
         self._rebuild_menu()
+        self._try_start_ai_worker()
 
     def _on_ai_fail(self, err: str) -> None:
         self._ai_thread = None
         QMessageBox.critical(None, "AI pipeline failed", err[:4000])
         self._rebuild_menu()
+        self._try_start_ai_worker()
 
     def _open_folder(self) -> None:
         path = output_dir()

@@ -37,6 +37,18 @@ def _looks_like_cuda_runtime_missing(exc: BaseException) -> bool:
     return any(n in msg for n in needles)
 
 
+def _looks_like_cuda_oom_or_pressure(exc: BaseException) -> bool:
+    """OOM or allocation failure when another process uses most VRAM."""
+    m = str(exc).lower()
+    if "out of memory" in m:
+        return True
+    if "failed to allocate" in m and "cuda" in m:
+        return True
+    if "cuda" in m and ("memory" in m or "oom" in m):
+        return True
+    return False
+
+
 def _transcribe_once(
     audio_path: Path,
     *,
@@ -74,11 +86,14 @@ def transcribe_file(
             compute_type=compute_type,
         )
     except (RuntimeError, OSError) as e:
-        if dev not in ("cuda", "auto") or not _looks_like_cuda_runtime_missing(e):
+        if dev not in ("cuda", "auto"):
+            raise
+        recoverable = _looks_like_cuda_runtime_missing(e) or _looks_like_cuda_oom_or_pressure(e)
+        if not recoverable:
             raise
         cpu_ct = _cpu_fallback_compute_type(compute_type)
         logger.warning(
-            "GPU/CUDA unavailable (%s). Retrying Whisper on CPU (compute_type=%s).",
+            "GPU/CUDA issue (%s). Retrying Whisper on CPU (compute_type=%s).",
             e,
             cpu_ct,
         )

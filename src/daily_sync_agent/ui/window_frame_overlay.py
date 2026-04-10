@@ -8,7 +8,12 @@ from PySide6.QtWidgets import QWidget
 
 
 class WindowFrameOverlay(QWidget):
-    """Frameless, topmost rectangle showing where the last capture region was."""
+    """Frameless, topmost rectangle showing where the last capture region was.
+
+    Use as a **top-level** window only (``parent=None``): ``setGeometry`` must be in
+    **global X11 screen pixels**, matching ffmpeg ``x11grab`` and ``WindowInfo``. A
+    parent widget would use **local** coordinates and misalign the highlight.
+    """
 
     def __init__(self, rect: QRect, *, duration_ms: int = 2800, parent: QWidget | None = None) -> None:
         super().__init__(
