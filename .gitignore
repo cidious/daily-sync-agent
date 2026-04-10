@@ -5,6 +5,8 @@ __pycache__/
 dist/
 build/
 .ruff_cache/
+.idea/
+.vscode/
 
 # Local test outputs (e.g. daily-sync-agent process in repo root)
 /transcript.txt
