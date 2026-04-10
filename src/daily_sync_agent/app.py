@@ -8,8 +8,8 @@ import os
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import QRect, Qt, QThread, Signal
-from PySide6.QtGui import QAction, QActionGroup
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, QThread, Signal
+from PySide6.QtGui import QAction, QActionGroup, QCursor, QGuiApplication
 from shiboken6 import isValid
 from PySide6.QtWidgets import (
     QApplication,
@@ -69,6 +69,50 @@ def _is_shift_pressed_now() -> bool:
     except Exception as e:
         logger.debug("Could not read X11 Shift state for tray activation: %s", e)
         return False
+
+
+def _panel_edge(screen_rect: QRect, available_rect: QRect) -> str | None:
+    gaps = {
+        "top": max(0, available_rect.top() - screen_rect.top()),
+        "bottom": max(0, screen_rect.bottom() - available_rect.bottom()),
+        "left": max(0, available_rect.left() - screen_rect.left()),
+        "right": max(0, screen_rect.right() - available_rect.right()),
+    }
+    edge, size = max(gaps.items(), key=lambda it: it[1])
+    return edge if size > 0 else None
+
+
+def _clamp_popup_point(p: QPoint, bounds: QRect, size: QSize) -> QPoint:
+    max_x = bounds.right() - size.width() + 1
+    max_y = bounds.bottom() - size.height() + 1
+    return QPoint(
+        max(bounds.left(), min(p.x(), max_x)),
+        max(bounds.top(), min(p.y(), max_y)),
+    )
+
+
+def _tray_menu_popup_point(
+    *,
+    screen_rect: QRect,
+    available_rect: QRect,
+    tray_rect: QRect,
+    menu_size: QSize,
+    cursor_pos: QPoint,
+) -> QPoint:
+    edge = _panel_edge(screen_rect, available_rect)
+    x = tray_rect.left() if not tray_rect.isNull() else cursor_pos.x()
+    y = cursor_pos.y()
+    if edge == "bottom":
+        y = available_rect.bottom() - menu_size.height() + 1
+    elif edge == "top":
+        y = available_rect.top()
+    elif edge == "left":
+        x = available_rect.left()
+        y = tray_rect.top() if not tray_rect.isNull() else cursor_pos.y()
+    elif edge == "right":
+        x = available_rect.right() - menu_size.width() + 1
+        y = tray_rect.top() if not tray_rect.isNull() else cursor_pos.y()
+    return _clamp_popup_point(QPoint(x, y), available_rect, menu_size)
 
 
 def _fill_whisper_model_combo(combo: QComboBox, current_model: str) -> None:
@@ -160,8 +204,6 @@ class TrayApplication(QWidget):
         self._restore_last_capture_from_config()
 
         self._menu = QMenu()
-        self._menu.aboutToShow.connect(self._rebuild_menu)
-        self._tray.setContextMenu(self._menu)
         self._tray.activated.connect(self._on_activated)
         self._rebuild_menu()
 
@@ -269,6 +311,10 @@ class TrayApplication(QWidget):
             self._frame_preview = None
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason == QSystemTrayIcon.ActivationReason.Context:
+            self._rebuild_menu()
+            self._menu.popup(self._tray_menu_popup_pos())
+            return
         if reason not in (
             QSystemTrayIcon.ActivationReason.Trigger,
             QSystemTrayIcon.ActivationReason.DoubleClick,
@@ -292,6 +338,33 @@ class TrayApplication(QWidget):
             )
             return
         self._start_recording()
+
+    def _tray_menu_popup_pos(self) -> QPoint:
+        tray_rect = self._tray.geometry()
+        cursor_pos = QCursor.pos()
+        anchor = tray_rect.center() if not tray_rect.isNull() else cursor_pos
+        screen = QGuiApplication.screenAt(anchor)
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return cursor_pos
+        menu_size = self._menu.sizeHint()
+        pos = _tray_menu_popup_point(
+            screen_rect=screen.geometry(),
+            available_rect=screen.availableGeometry(),
+            tray_rect=tray_rect,
+            menu_size=menu_size,
+            cursor_pos=cursor_pos,
+        )
+        logger.debug(
+            "Tray menu popup position screen=%s avail=%s tray=%s menu=%s pos=%s",
+            screen.geometry(),
+            screen.availableGeometry(),
+            tray_rect,
+            menu_size,
+            pos,
+        )
+        return pos
 
     def _rebuild_menu(self) -> None:
         try:
