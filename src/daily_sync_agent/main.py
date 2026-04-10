@@ -84,7 +84,7 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     tray = TrayApplication(debug=args.debug, debug_log_path=debug_log_path)
-    app.aboutToQuit.connect(tray.wait_for_ai_thread)
+    app.aboutToQuit.connect(tray.shutdown)
     tray.show()
     sys.exit(app.exec())
 

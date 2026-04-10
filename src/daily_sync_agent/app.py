@@ -8,11 +8,12 @@ import os
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import QRect, QThread, Signal
+from PySide6.QtCore import QRect, Qt, QThread, Signal
 from PySide6.QtGui import QAction, QActionGroup
 from shiboken6 import isValid
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -27,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from daily_sync_agent.ai.pipeline import run_transcribe_and_summarize
-from daily_sync_agent.ai.summarize import list_ollama_models
+from daily_sync_agent.ai.summarize import list_ollama_models, unload_ollama_models
 from daily_sync_agent.ai.whisper_compute import compute_type_choices, pick_compute_index_for_value
 from daily_sync_agent.ai.whisper_models import list_whisper_models_for_combo, normalize_whisper_device
 from daily_sync_agent.audio.devices import AudioDevices, AudioMode, list_devices
@@ -36,9 +37,38 @@ from daily_sync_agent.capture.ffmpeg import FfmpegPaths, RecordingProcess, build
 from daily_sync_agent.capture.window_x11 import WindowInfo, pick_window_x11
 from daily_sync_agent.icons import icon_idle, icon_recording
 from daily_sync_agent.settings import AppConfig, log_dir, output_dir
+from daily_sync_agent.ui.coordinate_map import build_screen_coordinate_maps, map_native_rect_to_logical
 from daily_sync_agent.ui.window_frame_overlay import WindowFrameOverlay
 
 logger = logging.getLogger(__name__)
+
+
+def _is_shift_pressed_now() -> bool:
+    """Best-effort Shift state detection for tray activation on Linux/X11 shells."""
+    mods = QApplication.keyboardModifiers() | QApplication.queryKeyboardModifiers()
+    if mods & Qt.KeyboardModifier.ShiftModifier:
+        return True
+
+    # Some tray hosts do not forward modifier state to Qt; read X11 keymap directly.
+    try:
+        from Xlib import XK, display as xdisplay
+
+        dpy = xdisplay.Display()
+        try:
+            keymap = dpy.query_keymap()
+
+            def down(keysym_name: str) -> bool:
+                keycode = dpy.keysym_to_keycode(XK.string_to_keysym(keysym_name))
+                if keycode <= 0:
+                    return False
+                return bool(keymap[keycode >> 3] & (1 << (keycode & 7)))
+
+            return down("Shift_L") or down("Shift_R")
+        finally:
+            dpy.close()
+    except Exception as e:
+        logger.debug("Could not read X11 Shift state for tray activation: %s", e)
+        return False
 
 
 def _fill_whisper_model_combo(combo: QComboBox, current_model: str) -> None:
@@ -159,6 +189,18 @@ class TrayApplication(QWidget):
                     )
                 break
 
+    def shutdown(self) -> None:
+        """Best-effort cleanup before process exit."""
+        logger.debug("Application shutdown started; draining AI workers before cleanup")
+        self.wait_for_ai_thread()
+        logger.debug("Application shutdown cleanup: requesting Ollama unload/stop")
+        unload_ollama_models(
+            self._config.ollama_base_url,
+            preferred_model=self._config.ollama_model,
+            stop_cli=True,
+        )
+        logger.debug("Application shutdown cleanup finished")
+
     def show(self) -> None:  # noqa: A003
         self._tray.show()
         if self._debug and self._debug_log_path:
@@ -207,7 +249,9 @@ class TrayApplication(QWidget):
             )
             return
         info = self._selected_window
-        rect = QRect(info.x, info.y, info.width, info.height)
+        native_rect = QRect(info.x, info.y, info.width, info.height)
+        rect = map_native_rect_to_logical(native_rect, build_screen_coordinate_maps())
+        logger.debug("Preview overlay rect native=%s logical=%s", native_rect, rect)
         prev = self._frame_preview
         overlay = WindowFrameOverlay(rect, parent=None)
         overlay.destroyed.connect(lambda o=overlay: self._on_frame_preview_destroyed(o))
@@ -225,11 +269,29 @@ class TrayApplication(QWidget):
             self._frame_preview = None
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
-        if reason in (
+        if reason not in (
             QSystemTrayIcon.ActivationReason.Trigger,
             QSystemTrayIcon.ActivationReason.DoubleClick,
         ):
-            self._show_saved_frame_preview()
+            return
+        if _is_shift_pressed_now():
+            self._toggle_recording_from_tray()
+            return
+        self._show_saved_frame_preview()
+
+    def _toggle_recording_from_tray(self) -> None:
+        if self._recording is not None:
+            self._stop_recording()
+            return
+        if self._selected_window is None:
+            self._tray.showMessage(
+                "Recording",
+                "No window saved yet — use “Select window…” in the tray menu.",
+                QSystemTrayIcon.MessageIcon.Information,
+                5000,
+            )
+            return
+        self._start_recording()
 
     def _rebuild_menu(self) -> None:
         try:
@@ -592,6 +654,8 @@ class TrayApplication(QWidget):
         combo_whisper_dev.currentIndexChanged.connect(on_whisper_device_changed)
 
         e_fps = QLineEdit(str(cfg.ffmpeg_fps))
+        chk_unload_models = QCheckBox("Unload Whisper/Ollama models after each task")
+        chk_unload_models.setChecked(cfg.unload_models_after_task)
         combo_summary = QComboBox()
         combo_summary.addItem("General (short paragraph)", "general")
         combo_summary.addItem("Daily scrum (structured)", "daily_scrum")
@@ -605,6 +669,7 @@ class TrayApplication(QWidget):
         lay.addRow("Whisper model", row_whisper)
         lay.addRow("Whisper device", combo_whisper_dev)
         lay.addRow("Whisper compute type", combo_whisper_ct)
+        lay.addRow("Low-VRAM mode", chk_unload_models)
         lay.addRow("ffmpeg fps", e_fps)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(d.accept)
@@ -622,6 +687,7 @@ class TrayApplication(QWidget):
             self._config.whisper_device = str(wdv) if wdv else "auto"
             wct = combo_whisper_ct.currentData()
             self._config.whisper_compute_type = str(wct) if wct else "default"
+            self._config.unload_models_after_task = chk_unload_models.isChecked()
             try:
                 self._config.ffmpeg_fps = max(1, int(e_fps.text().strip()))
             except ValueError:

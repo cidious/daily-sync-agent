@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 
 import httpx
 
@@ -136,6 +137,24 @@ def _ollama_model_names(tags_json: dict) -> list[str]:
     return [m["name"] for m in tags_json.get("models", []) if m.get("name")]
 
 
+def _running_ollama_model_names(ps_json: dict) -> list[str]:
+    out: list[str] = []
+    for m in ps_json.get("models", []) if isinstance(ps_json, dict) else []:
+        name = m.get("name") if isinstance(m, dict) else None
+        if isinstance(name, str) and name.strip():
+            out.append(name.strip())
+    return out
+
+
+def _with_ollama_keepalive(payload: dict, *, unload_model_after_task: bool) -> dict:
+    if not unload_model_after_task:
+        return payload
+    p = dict(payload)
+    # Ollama keep_alive=0 unloads the model runner after the request.
+    p["keep_alive"] = 0
+    return p
+
+
 def resolve_ollama_model(tags_json: dict, configured: str) -> str:
     """Pick a model name that exists locally. Empty ``configured`` → first in list."""
     names = _ollama_model_names(tags_json)
@@ -178,6 +197,7 @@ def summarize_text(
     summary_mode: str = "general",
     event_date_hint: str = "",
     timeout_s: float = 900.0,
+    unload_model_after_task: bool = False,
 ) -> str:
     base = base_url.rstrip("/")
     mode = (summary_mode or "general").strip().lower()
@@ -221,7 +241,7 @@ def summarize_text(
         ollama_chat = (
             "Ollama /api/chat",
             f"{base}/api/chat",
-            {
+            _with_ollama_keepalive({
                 "model": resolved_model,
                 "messages": [
                     {"role": "system", "content": system},
@@ -229,18 +249,18 @@ def summarize_text(
                 ],
                 "stream": False,
                 "options": {"num_predict": token_out, "temperature": 0.3},
-            },
+            }, unload_model_after_task=unload_model_after_task),
             _parse_ollama_chat,
         )
         ollama_generate = (
             "Ollama /api/generate",
             f"{base}/api/generate",
-            {
+            _with_ollama_keepalive({
                 "model": resolved_model,
                 "prompt": full_prompt,
                 "stream": False,
                 "options": {"temperature": 0.3, "num_predict": token_out},
-            },
+            }, unload_model_after_task=unload_model_after_task),
             lambda d: (d.get("response") or "").strip() if isinstance(d, dict) else "",
         )
         openai_chat = (
@@ -353,3 +373,66 @@ def summarize_text(
         raise RuntimeError(
             f"No LLM endpoint responded on {base}. Set Preferences → Ollama URL and model."
         )
+
+
+def unload_ollama_models(
+    base_url: str,
+    *,
+    preferred_model: str = "",
+    stop_cli: bool = False,
+    timeout_s: float = 8.0,
+) -> None:
+    """Best-effort unload of Ollama model runners from memory."""
+    base = (base_url or "").rstrip("/")
+    if not base:
+        return
+    logger.debug(
+        "Low-VRAM cleanup: unload_ollama_models base=%s stop_cli=%s preferred_model_set=%s",
+        base,
+        stop_cli,
+        bool(preferred_model.strip()),
+    )
+
+    names: set[str] = set()
+    if preferred_model.strip():
+        names.add(preferred_model.strip())
+
+    timeout = httpx.Timeout(connect=5.0, read=timeout_s, write=timeout_s, pool=5.0)
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            try:
+                ps = client.get(f"{base}/api/ps")
+                if ps.status_code == 200:
+                    names.update(_running_ollama_model_names(ps.json()))
+            except Exception as e:
+                logger.debug("Could not query running Ollama models: %s", e)
+
+            for name in sorted(names):
+                try:
+                    r = client.post(
+                        f"{base}/api/generate",
+                        json={"model": name, "prompt": "", "stream": False, "keep_alive": 0},
+                    )
+                    if r.status_code not in (200, 404):
+                        logger.info("Ollama unload request for %s returned HTTP %s", name, r.status_code)
+                except Exception as e:
+                    logger.debug("Ollama unload request failed for %s: %s", name, e)
+    except Exception as e:
+        logger.debug("Ollama unload client init failed: %s", e)
+
+    if not stop_cli:
+        logger.debug("Low-VRAM cleanup: HTTP unload phase finished (no CLI stop requested)")
+        return
+    for name in sorted(names):
+        try:
+            subprocess.run(
+                ["ollama", "stop", name],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except Exception as e:
+            logger.debug("ollama stop failed for %s: %s", name, e)
+    logger.debug("Low-VRAM cleanup: HTTP unload and CLI stop phases finished")
+

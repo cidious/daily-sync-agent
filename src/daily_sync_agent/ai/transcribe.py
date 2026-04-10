@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import logging
 from pathlib import Path
 
@@ -9,6 +10,19 @@ from daily_sync_agent.ai.audio_decode import load_audio_ffmpeg_mono_f32
 from daily_sync_agent.ai.whisper_models import normalize_whisper_device
 
 logger = logging.getLogger(__name__)
+
+_HALLUCINATION_SILENCE_THRESHOLD_S = 2.0
+
+
+def _transcribe_kwargs() -> dict[str, object]:
+    """Conservative defaults that reduce trailing hallucinations on silence/noise."""
+    return {
+        "beam_size": 5,
+        "condition_on_previous_text": False,
+        "vad_filter": True,
+        "word_timestamps": True,
+        "hallucination_silence_threshold": _HALLUCINATION_SILENCE_THRESHOLD_S,
+    }
 
 
 def _cpu_fallback_compute_type(compute_type: str) -> str:
@@ -55,19 +69,35 @@ def _transcribe_once(
     model_size: str,
     device: str,
     compute_type: str,
+    unload_model_after_task: bool = False,
 ) -> str:
     from faster_whisper import WhisperModel
 
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
-    sr = model.feature_extractor.sampling_rate
-    # Decode with ffmpeg + numpy so we never hit faster-whisper's PyAV path (can crash with
-    # UnicodeDecodeError in av.error on some locales when resampling FLAC/etc.).
-    audio = load_audio_ffmpeg_mono_f32(audio_path, sample_rate=sr)
-    segments, _info = model.transcribe(audio, beam_size=5)
-    parts: list[str] = []
-    for seg in segments:
-        parts.append(seg.text.strip())
-    return "\n".join(parts).strip()
+    model = None
+    try:
+        model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        sr = model.feature_extractor.sampling_rate
+        # Decode with ffmpeg + numpy so we never hit faster-whisper's PyAV path (can crash with
+        # UnicodeDecodeError in av.error on some locales when resampling FLAC/etc.).
+        audio = load_audio_ffmpeg_mono_f32(audio_path, sample_rate=sr)
+        kwargs = _transcribe_kwargs()
+        logger.debug(
+            "Whisper transcribe model=%s device=%s compute_type=%s options=%s",
+            model_size,
+            device,
+            compute_type,
+            kwargs,
+        )
+        segments, _info = model.transcribe(audio, **kwargs)
+        parts: list[str] = []
+        for seg in segments:
+            parts.append(seg.text.strip())
+        return "\n".join(parts).strip()
+    finally:
+        if unload_model_after_task and model is not None:
+            logger.debug("Releasing Whisper model resources after transcription task")
+            del model
+            gc.collect()
 
 
 def transcribe_file(
@@ -76,6 +106,7 @@ def transcribe_file(
     model_size: str = "base",
     device: str = "auto",
     compute_type: str = "default",
+    unload_model_after_task: bool = False,
 ) -> str:
     dev = normalize_whisper_device(device)
     try:
@@ -84,6 +115,7 @@ def transcribe_file(
             model_size=model_size,
             device=dev,
             compute_type=compute_type,
+            unload_model_after_task=unload_model_after_task,
         )
     except (RuntimeError, OSError) as e:
         if dev not in ("cuda", "auto"):
@@ -102,4 +134,5 @@ def transcribe_file(
             model_size=model_size,
             device="cpu",
             compute_type=cpu_ct,
+            unload_model_after_task=unload_model_after_task,
         )

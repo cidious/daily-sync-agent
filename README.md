@@ -16,6 +16,7 @@ You can also **process an existing video or audio file** from the command line (
 - **Local AI**:
   - **Ollama** (or another local HTTP API) at the URL in Preferences (default `http://127.0.0.1:11434`). Choose the **chat model** from the dropdown (installed models from your Ollama server), or **“First available”** to use the first model in `ollama list`. The app tries several HTTP endpoints for summarization. Verify the server with `curl -s http://127.0.0.1:11434/api/tags`. Slow local models may need a higher **`ollama_request_timeout_s`** in `config.json` (default is generous).
   - **faster-whisper** — choose model size, device (auto / CPU / GPU), and compute type in Preferences. If GPU is selected but CUDA libraries are missing, transcription falls back to CPU automatically.
+  - **Low-VRAM mode (Preferences checkbox)** — unload Whisper/Ollama models after each task to free GPU memory; on app exit, Ollama model runners are also unloaded/stopped best-effort.
 
 ### Whisper (faster-whisper) models
 
@@ -109,7 +110,7 @@ Use **`--log-file /path/to/app.log`** with **`--debug`** to choose the path. Per
 
 ## Usage
 
-1. Use the tray icon → **Select window…** and click the target window (or use `xdotool` if installed). The capture **rectangle is saved** in `config.json` (`last_capture_*` fields) so you can **Start recording** after restarting the app without picking again. **Left-click** the tray icon to **flash an on-screen frame** around the saved region (where the desktop sends a tray “activate” event); **right-click** opens the menu.
+1. Use the tray icon → **Select window…** and click the target window (or use `xdotool` if installed). The capture **rectangle is saved** in `config.json` (`last_capture_*` fields) so you can **Start recording** after restarting the app without picking again. **Left-click** the tray icon to **flash an on-screen frame** around the saved region (where the desktop sends a tray “activate” event). **Shift+left-click** toggles recording (**start** when idle, **stop** when already recording). **Right-click** opens the menu.
 2. Choose **Audio capture mode**:
    - **Mix**: loopback of the chosen **playback** device (what you hear) plus the chosen **recording** device (microphone), mixed together.
    - **Playback / system output**: monitor of the selected sink only.
@@ -122,7 +123,7 @@ Use **`--log-file /path/to/app.log`** with **`--debug`** to choose the path. Per
    - `transcript.txt` — Whisper output
    - `summary.txt` — LLM summary (format depends on **Preferences → Summary format**: **General** = one short paragraph; **Daily scrum** = structured sections — title, date, topics, solutions, tasks, blockers — in the same language as the transcript)  
    FFmpeg logs: `~/.cache/daily-sync-agent/logs/`.  
-   App config: `~/.config/daily-sync-agent/config.json` (window placement, last capture rectangle, Ollama URL/model, **`summary_mode`**, **`ollama_request_timeout_s`**, Whisper options, etc.).
+   App config: `~/.config/daily-sync-agent/config.json` (window placement, last capture rectangle, Ollama URL/model, **`summary_mode`**, **`ollama_request_timeout_s`**, Whisper options, **`unload_models_after_task`**, etc.).
 
 ## Legal and privacy
 

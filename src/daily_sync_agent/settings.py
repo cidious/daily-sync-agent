@@ -39,6 +39,8 @@ class AppConfig:
     whisper_model: str = "base"
     whisper_device: str = "auto"  # auto, cpu, cuda
     whisper_compute_type: str = "default"
+    # Free model memory aggressively after each AI task (useful on small VRAM GPUs).
+    unload_models_after_task: bool = False
     ffmpeg_fps: int = 25
     display: str = ":0"
     # Preferences dialog geometry (None = use Qt default placement/size)
