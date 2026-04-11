@@ -80,6 +80,27 @@ daily-sync-agent
 
 Ensure `DISPLAY` points at your X11 session (e.g. `:0`).
 
+### System-wide install (launcher + menu entry)
+
+To install the app for all users (under `/opt`, with a launcher in `/usr/share/applications` and a command in `/usr/local/bin`):
+
+```bash
+./scripts/install-system-app.sh --with-deps
+```
+
+This installs:
+
+- `/opt/daily-sync-agent/src` (copied repository snapshot)
+- `/opt/daily-sync-agent/.venv` (runtime virtualenv)
+- `/usr/local/bin/daily-sync-agent` (symlink to the venv entrypoint)
+- `/usr/share/applications/daily-sync-agent.desktop` (start-menu launcher)
+
+Uninstall:
+
+```bash
+./scripts/install-system-app.sh --uninstall
+```
+
 ### CLI: transcribe and summarize a file
 
 To **transcribe and summarize** an existing **video or audio** file (anything **ffmpeg** can decode) and write **`transcript.txt`** and **`summary.txt`** in the **same folder** as the media file:

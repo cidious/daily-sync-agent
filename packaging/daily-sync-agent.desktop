@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Daily sync agent
+Comment=Record selected X11 window + audio and run local transcript/summary
+Exec=daily-sync-agent gui
+TryExec=daily-sync-agent
+Icon=applications-multimedia
+Terminal=false
+Categories=AudioVideo;Utility;
+Keywords=recording;transcript;summary;whisper;ollama;
+StartupNotify=false
+
