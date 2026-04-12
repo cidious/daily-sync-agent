@@ -35,6 +35,8 @@ class AppConfig:
     ollama_model: str = ""  # empty: use first model from `ollama list` / GET /api/tags
     # Max time to wait for one LLM HTTP response (local CPU models can be slow for long outputs).
     ollama_request_timeout_s: float = 900.0
+    transcribe_speech: bool = True
+    summarize_transcript: bool = True
     summary_mode: str = "general"  # "general" | "daily_scrum"
     whisper_model: str = "base"
     whisper_device: str = "auto"  # auto, cpu, cuda

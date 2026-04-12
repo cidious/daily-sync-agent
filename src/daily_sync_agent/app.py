@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLineEdit,
     QMenu,
@@ -165,7 +166,7 @@ class AiThread(QThread):
             logger.debug("AI pipeline start audio=%s session=%s", self._audio_path, self._session_dir)
             t, s = run_transcribe_and_summarize(self._audio_path, self._session_dir, self._config)
             logger.debug("AI pipeline done transcript=%s summary=%s", t, s)
-            self.finished_ok.emit(self._session_dir)
+            self.finished_ok.emit((self._session_dir, s is not None))
         except Exception:
             logger.exception("AI pipeline failed")
             self.failed.emit(traceback.format_exc())
@@ -235,12 +236,15 @@ class TrayApplication(QWidget):
         """Best-effort cleanup before process exit."""
         logger.debug("Application shutdown started; draining AI workers before cleanup")
         self.wait_for_ai_thread()
-        logger.debug("Application shutdown cleanup: requesting Ollama unload/stop")
-        unload_ollama_models(
-            self._config.ollama_base_url,
-            preferred_model=self._config.ollama_model,
-            stop_cli=True,
-        )
+        if self._config.transcribe_speech and self._config.summarize_transcript:
+            logger.debug("Application shutdown cleanup: requesting Ollama unload/stop")
+            unload_ollama_models(
+                self._config.ollama_base_url,
+                preferred_model=self._config.ollama_model,
+                stop_cli=True,
+            )
+        else:
+            logger.debug("Application shutdown cleanup: skipping Ollama unload because AI processing is disabled")
         logger.debug("Application shutdown cleanup finished")
 
     def show(self) -> None:  # noqa: A003
@@ -587,6 +591,16 @@ class TrayApplication(QWidget):
                 6000,
             )
 
+        if not self._config.transcribe_speech:
+            self._tray.showMessage(
+                "Recording",
+                f"Saved recording in {session} (AI processing disabled in Preferences).",
+                QSystemTrayIcon.MessageIcon.Information,
+                7000,
+            )
+            self._rebuild_menu()
+            return
+
         self._enqueue_ai_pipeline(audio_path, session)
 
     def _enqueue_ai_pipeline(self, audio_path: Path, session: Path) -> None:
@@ -602,6 +616,11 @@ class TrayApplication(QWidget):
         self._try_start_ai_worker()
 
     def _try_start_ai_worker(self) -> None:
+        if not self._config.transcribe_speech:
+            if self._ai_queue:
+                logger.info("AI queue discarded because transcription is disabled")
+                self._ai_queue.clear()
+            return
         if self._ai_thread is not None and self._ai_thread.isRunning():
             return
         if not self._ai_queue:
@@ -609,7 +628,7 @@ class TrayApplication(QWidget):
         audio_path, session = self._ai_queue.pop(0)
         self._tray.showMessage(
             "Processing",
-            "Transcribing and summarizing (local AI)…",
+            "Transcribing and summarizing (local AI)..." if self._config.summarize_transcript else "Transcribing (summary disabled)...",
             QSystemTrayIcon.MessageIcon.Information,
             5000,
         )
@@ -621,10 +640,17 @@ class TrayApplication(QWidget):
 
     def _on_ai_ok(self, session_dir: object) -> None:
         self._ai_thread = None
-        sd = session_dir if isinstance(session_dir, Path) else Path(session_dir)
+        did_summarize = self._config.summarize_transcript
+        raw = session_dir
+        if isinstance(raw, tuple) and len(raw) == 2:
+            session_obj, summarized_obj = raw
+            sd = session_obj if isinstance(session_obj, Path) else Path(session_obj)
+            did_summarize = bool(summarized_obj)
+        else:
+            sd = raw if isinstance(raw, Path) else Path(raw)
         self._tray.showMessage(
             "Done",
-            f"Saved transcript and summary in {sd}",
+            f"Saved transcript and summary in {sd}" if did_summarize else f"Saved transcript in {sd} (summary disabled)",
             QSystemTrayIcon.MessageIcon.Information,
             8000,
         )
@@ -645,6 +671,12 @@ class TrayApplication(QWidget):
         d = QDialog(self)
         d.setWindowTitle("Preferences")
         lay = QFormLayout(d)
+
+        def add_separator() -> None:
+            sep = QFrame(d)
+            sep.setFrameShape(QFrame.Shape.HLine)
+            sep.setFrameShadow(QFrame.Shadow.Sunken)
+            lay.addRow(sep)
 
         cfg = self._config
         if (
@@ -727,6 +759,10 @@ class TrayApplication(QWidget):
         combo_whisper_dev.currentIndexChanged.connect(on_whisper_device_changed)
 
         e_fps = QLineEdit(str(cfg.ffmpeg_fps))
+        chk_transcribe = QCheckBox("Transcribe speech")
+        chk_transcribe.setChecked(cfg.transcribe_speech)
+        chk_summarize = QCheckBox("Summarize the transcripted text")
+        chk_summarize.setChecked(cfg.summarize_transcript)
         chk_unload_models = QCheckBox("Unload Whisper/Ollama models after each task")
         chk_unload_models.setChecked(cfg.unload_models_after_task)
         combo_summary = QComboBox()
@@ -736,22 +772,49 @@ class TrayApplication(QWidget):
         idx_sm = combo_summary.findData(sm)
         combo_summary.setCurrentIndex(idx_sm if idx_sm >= 0 else 0)
 
-        lay.addRow("Ollama base URL", e_ollama)
-        lay.addRow("Ollama chat model", row_model)
-        lay.addRow("Summary format", combo_summary)
+        def sync_ai_controls() -> None:
+            ai_enabled = chk_transcribe.isChecked()
+            summarize_enabled = ai_enabled and chk_summarize.isChecked()
+
+            combo_whisper.setEnabled(ai_enabled)
+            btn_whisper_refresh.setEnabled(ai_enabled)
+            combo_whisper_dev.setEnabled(ai_enabled)
+            combo_whisper_ct.setEnabled(ai_enabled)
+            chk_summarize.setEnabled(ai_enabled)
+            chk_unload_models.setEnabled(ai_enabled)
+
+            e_ollama.setEnabled(summarize_enabled)
+            combo_model.setEnabled(summarize_enabled)
+            btn_refresh_models.setEnabled(summarize_enabled)
+            combo_summary.setEnabled(summarize_enabled)
+
+        chk_transcribe.toggled.connect(lambda _checked: sync_ai_controls())
+        chk_summarize.toggled.connect(lambda _checked: sync_ai_controls())
+        sync_ai_controls()
+
+        lay.addRow("Video FPS", e_fps)
+        add_separator()
+        lay.addRow("Transcription", chk_transcribe)
         lay.addRow("Whisper model", row_whisper)
         lay.addRow("Whisper device", combo_whisper_dev)
         lay.addRow("Whisper compute type", combo_whisper_ct)
+        add_separator()
+        lay.addRow("Summarization", chk_summarize)
+        lay.addRow("Summary format", combo_summary)
+        lay.addRow("Ollama base URL", e_ollama)
+        lay.addRow("Ollama chat model", row_model)
+        add_separator()
         lay.addRow("Low-VRAM mode", chk_unload_models)
-        lay.addRow("ffmpeg fps", e_fps)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(d.accept)
         buttons.rejected.connect(d.reject)
         lay.addRow(buttons)
         if d.exec() == QDialog.DialogCode.Accepted:
+            self._config.transcribe_speech = chk_transcribe.isChecked()
             self._config.ollama_base_url = e_ollama.text().strip() or self._config.ollama_base_url
             md = combo_model.currentData()
             self._config.ollama_model = md.strip() if isinstance(md, str) else ""
+            self._config.summarize_transcript = chk_summarize.isChecked() if self._config.transcribe_speech else False
             smd = combo_summary.currentData()
             self._config.summary_mode = str(smd) if smd else "general"
             wm = combo_whisper.currentData()
@@ -760,12 +823,15 @@ class TrayApplication(QWidget):
             self._config.whisper_device = str(wdv) if wdv else "auto"
             wct = combo_whisper_ct.currentData()
             self._config.whisper_compute_type = str(wct) if wct else "default"
-            self._config.unload_models_after_task = chk_unload_models.isChecked()
+            self._config.unload_models_after_task = chk_unload_models.isChecked() if self._config.transcribe_speech else False
             try:
                 self._config.ffmpeg_fps = max(1, int(e_fps.text().strip()))
             except ValueError:
                 pass
             self._config.save()
+
+            # If transcription is disabled, queued jobs should not linger.
+            self._try_start_ai_worker()
 
 
 def QDesktopServices_open(path: Path) -> None:

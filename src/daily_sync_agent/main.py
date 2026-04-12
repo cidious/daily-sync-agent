@@ -29,8 +29,7 @@ def _gui_startup_block_reason() -> str | None:
 
 
 def _cli_process_media(media: Path, *, debug: bool) -> int:
-    """Transcribe and summarize one file; write ``transcript.txt`` and ``summary.txt`` beside it."""
-    from daily_sync_agent.ai.pipeline import run_transcribe_and_summarize
+    """Transcribe one file and optionally summarize it; write outputs beside it."""
     from daily_sync_agent.settings import AppConfig
 
     path = media.expanduser().resolve()
@@ -38,6 +37,12 @@ def _cli_process_media(media: Path, *, debug: bool) -> int:
         print(f"Not a file: {path}", file=sys.stderr)
         return 2
     cfg = AppConfig.load()
+    if not cfg.transcribe_speech:
+        print("Transcription is disabled in config; skipping AI processing.")
+        return 0
+
+    from daily_sync_agent.ai.pipeline import run_transcribe_and_summarize
+
     out_dir = path.parent
     print(f"Processing: {path}")
     print(f"Output dir:  {out_dir}")
@@ -49,7 +54,10 @@ def _cli_process_media(media: Path, *, debug: bool) -> int:
             traceback.print_exc()
         return 1
     print(f"Wrote {transcript_path}")
-    print(f"Wrote {summary_path}")
+    if summary_path is not None:
+        print(f"Wrote {summary_path}")
+    else:
+        print("Summary generation disabled in config; skipped summary.txt")
     return 0
 
 
@@ -78,7 +86,7 @@ def main() -> None:
     )
     p_process = sub.add_parser(
         "process",
-        help="Transcribe and summarize a video or audio file; save transcript.txt and summary.txt next to it.",
+        help="Transcribe a video or audio file and optionally summarize it; save transcript.txt and, if enabled, summary.txt next to it.",
     )
     p_process.add_argument(
         "media",

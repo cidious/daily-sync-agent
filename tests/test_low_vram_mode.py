@@ -10,6 +10,9 @@ class LowVramModeTests(unittest.TestCase):
     def test_config_default_is_disabled(self) -> None:
         self.assertIs(AppConfig().unload_models_after_task, False)
 
+    def test_transcription_default_is_enabled(self) -> None:
+        self.assertIs(AppConfig().transcribe_speech, True)
+
     def test_running_ollama_model_name_parser(self) -> None:
         names = _running_ollama_model_names(
             {

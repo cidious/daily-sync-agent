@@ -17,8 +17,8 @@ def run_transcribe_and_summarize(
     audio_path: Path,
     out_dir: Path,
     config: AppConfig,
-) -> tuple[Path, Path]:
-    """Write transcript.txt and summary.txt next to recordings; return paths."""
+) -> tuple[Path, Path | None]:
+    """Write transcript.txt and optional summary.txt next to recordings; return paths."""
     if config.unload_models_after_task:
         logger.debug("Low-VRAM mode enabled: model cleanup requested after this AI task")
     text = transcribe_file(
@@ -30,6 +30,10 @@ def run_transcribe_and_summarize(
     )
     transcript_path = out_dir / "transcript.txt"
     transcript_path.write_text(text + "\n", encoding="utf-8")
+
+    if not config.summarize_transcript:
+        logger.debug("Summarization disabled by configuration; skipping summary generation")
+        return transcript_path, None
 
     summary = summarize_text(
         text,

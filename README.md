@@ -14,7 +14,8 @@ You can also **process an existing video or audio file** from the command line (
   - Optional: `xwininfo` for geometry when using `xdotool`
 - **Python**: 3.11+
 - **Local AI**:
-  - **Ollama** (or another local HTTP API) at the URL in Preferences (default `http://127.0.0.1:11434`). Choose the **chat model** from the dropdown (installed models from your Ollama server), or **“First available”** to use the first model in `ollama list`. The app tries several HTTP endpoints for summarization. Verify the server with `curl -s http://127.0.0.1:11434/api/tags`. Slow local models may need a higher **`ollama_request_timeout_s`** in `config.json` (default is generous).
+  - **Transcribe speech (Preferences checkbox)** — master AI toggle. When off, recording still saves media files but transcription/summarization are skipped. The app disables all AI controls (Whisper settings, summarization, and low-VRAM mode).
+  - **Ollama** (or another local HTTP API) at the URL in Preferences (default `http://127.0.0.1:11434`). Choose the **chat model** from the dropdown (installed models from your Ollama server), or **“First available”** to use the first model in `ollama list`. The app tries several HTTP endpoints for summarization. Verify the server with `curl -s http://127.0.0.1:11434/api/tags`. Slow local models may need a higher **`ollama_request_timeout_s`** in `config.json` (default is generous). If **Preferences → Summarize the transcripted text** is turned off, Ollama is not used.
   - **faster-whisper** — choose model size, device (auto / CPU / GPU), and compute type in Preferences. If GPU is selected but CUDA libraries are missing, transcription falls back to CPU automatically.
   - **Low-VRAM mode (Preferences checkbox)** — unload Whisper/Ollama models after each task to free GPU memory; on app exit, Ollama model runners are also unloaded/stopped best-effort.
 
@@ -103,13 +104,13 @@ Uninstall:
 
 ### CLI: transcribe and summarize a file
 
-To **transcribe and summarize** an existing **video or audio** file (anything **ffmpeg** can decode) and write **`transcript.txt`** and **`summary.txt`** in the **same folder** as the media file:
+To **transcribe** an existing **video or audio** file (anything **ffmpeg** can decode) and optionally write **`summary.txt`** in the **same folder** as the media file:
 
 ```bash
 daily-sync-agent process /path/to/recording.mkv
 ```
 
-Settings come from **`~/.config/daily-sync-agent/config.json`** (same as the tray app: Whisper model, Ollama URL/model, summary format, timeouts). This subcommand does **not** start the GUI (no `DISPLAY` required for the AI step).
+Settings come from **`~/.config/daily-sync-agent/config.json`** (same as the tray app: Whisper model, whether transcription/summarization is enabled, Ollama URL/model, summary format, timeouts). This subcommand does **not** start the GUI (no `DISPLAY` required for the AI step). If `transcribe_speech` is disabled, this command exits after printing that AI processing was skipped.
 
 Global options must appear **before** the subcommand, for example:
 
@@ -142,9 +143,9 @@ Use **`--log-file /path/to/app.log`** with **`--debug`** to choose the path. Per
    - `recording.mkv` — video + audio
    - `recording.flac` — audio only (used for transcription)
    - `transcript.txt` — Whisper output
-   - `summary.txt` — LLM summary (format depends on **Preferences → Summary format**: **General** = one short paragraph; **Daily scrum** = structured sections — title, date, topics, solutions, tasks, blockers — in the same language as the transcript)  
+   - `summary.txt` — LLM summary when summarization is enabled (format depends on **Preferences → Summary format**: **General** = one short paragraph; **Daily scrum** = structured sections — title, date, topics, solutions, tasks, blockers — in the same language as the transcript)  
    FFmpeg logs: `~/.cache/daily-sync-agent/logs/`.  
-   App config: `~/.config/daily-sync-agent/config.json` (window placement, last capture rectangle, Ollama URL/model, **`summary_mode`**, **`ollama_request_timeout_s`**, Whisper options, **`unload_models_after_task`**, etc.).
+   App config: `~/.config/daily-sync-agent/config.json` (window placement, last capture rectangle, Ollama URL/model, **`transcribe_speech`**, **`summarize_transcript`**, **`summary_mode`**, **`ollama_request_timeout_s`**, Whisper options, **`unload_models_after_task`**, etc.).
 
 ## Legal and privacy
 
