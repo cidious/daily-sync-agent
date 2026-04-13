@@ -44,6 +44,37 @@ Model files are **downloaded automatically** the first time you transcribe with 
 3. **Confirm it is installed** — `ollama list` should show the model. `curl -s http://127.0.0.1:11434/api/tags` should include it under `"models"`.
 4. **Use it in this app** — Open **Preferences**, set **Ollama base URL** if needed, click **Refresh list** next to **Ollama chat model**, then pick the model in the dropdown. The window position and size are remembered for the next time you open Preferences.
 
+### Auto-select and install a summarizer model (GPU/VRAM aware)
+
+For long transcript summaries (around **32k tokens**), use the helper script:
+
+```bash
+./scripts/install-ollama-summarizer.sh
+```
+
+What it does:
+- Detects GPU presence and VRAM (`nvidia-smi` / `rocm-smi`, else CPU-only mode).
+- Chooses a best-fit model tier for summarization from one family (`qwen`, `gemma3`, `mistral-small`, `mistral-nemo`, `llama`) and defaults to `qwen` for `auto`.
+- Generates a tuned `Modelfile` with `num_ctx`, `num_gpu`, and generation parameters.
+- Pulls the chosen base model and creates a local alias (`daily-sync-summary` by default).
+
+Useful flags:
+
+```bash
+./scripts/install-ollama-summarizer.sh --dry-run
+./scripts/install-ollama-summarizer.sh --family gemma3
+./scripts/install-ollama-summarizer.sh --allow-cpu-offload --prefer-bigger
+./scripts/install-ollama-summarizer.sh --ctx 32768 --alias daily-sync-summary
+```
+
+Exact app settings recommended for this project after install:
+- `ollama_model`: `daily-sync-summary` (or your chosen `--alias`)
+- `ollama_request_timeout_s`: `1800`
+- `summary_mode`: `daily_scrum`
+- `summarize_transcript`: `true`
+- `transcribe_speech`: `true`
+- `unload_models_after_task`: `true` on small GPUs (typically under 16 GB VRAM), otherwise `false`
+
 ### System packages (automated)
 
 If you see **“could not query audio devices … pactl”** (or similar), install OS dependencies first. From the repository root:
