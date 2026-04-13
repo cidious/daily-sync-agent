@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import time
 
 import httpx
 
@@ -199,6 +200,7 @@ def summarize_text(
     timeout_s: float = 900.0,
     unload_model_after_task: bool = False,
 ) -> str:
+    started_at = time.monotonic()
     base = base_url.rstrip("/")
     mode = (summary_mode or "general").strip().lower()
     if mode not in ("general", "daily_scrum"):
@@ -211,6 +213,15 @@ def summarize_text(
     )
     full_prompt = f"{system}\n\n{user_block}"
     token_out = 1024 if mode == "daily_scrum" else 512
+    logger.debug(
+        "Summary generation started base=%s configured_model=%s mode=%s timeout_s=%.1f unload_after_task=%s transcript_chars=%d",
+        base,
+        model or "<first-available>",
+        mode,
+        float(timeout_s),
+        unload_model_after_task,
+        len(text),
+    )
 
     read_s = max(120.0, float(timeout_s))
     # Local LLMs often need minutes for long outputs; use an explicit read timeout (not just connect).
@@ -236,6 +247,12 @@ def summarize_text(
             "summarizer will try several HTTP APIs anyway",
             base,
         )
+    logger.debug(
+        "Summary model resolution base=%s looks_like_ollama=%s resolved_model=%s",
+        base,
+        looks_like_ollama,
+        resolved_model or "<none>",
+    )
 
     with httpx.Client(timeout=client_timeout) as client:
         ollama_chat = (
@@ -309,11 +326,13 @@ def summarize_text(
         failures: list[str] = []
 
         for name, url, payload, parser in attempts:
+            attempt_started_at = time.monotonic()
             try:
                 r = client.post(url, json=payload)
             except httpx.RequestError as e:
                 failures.append(f"{name} ({url}): request error: {e}")
                 logger.info("%s failed: %s", name, e)
+                logger.debug("Summary attempt failed name=%s elapsed_s=%.3f", name, time.monotonic() - attempt_started_at)
                 continue
 
             if r.status_code == 200:
@@ -327,6 +346,17 @@ def summarize_text(
                     continue
                 out = parser(data)
                 if isinstance(out, str) and out.strip():
+                    elapsed_total_s = time.monotonic() - started_at
+                    elapsed_attempt_s = time.monotonic() - attempt_started_at
+                    logger.debug(
+                        "Summary generation finished endpoint=%s model=%s mode=%s attempt_s=%.3f total_s=%.3f chars=%d",
+                        name,
+                        resolved_model or "<none>",
+                        mode,
+                        elapsed_attempt_s,
+                        elapsed_total_s,
+                        len(out.strip()),
+                    )
                     return out.strip()
                 logger.warning(
                     "%s returned HTTP 200 but no extractable assistant text (keys=%s). Trying next endpoint.",
@@ -336,6 +366,7 @@ def summarize_text(
                 failures.append(
                     f"{name}: 200 OK but empty content (model may use a different JSON shape; see debug log)"
                 )
+                logger.debug("Summary attempt empty-content name=%s elapsed_s=%.3f", name, time.monotonic() - attempt_started_at)
                 continue
 
             if r.status_code == 404:
@@ -347,6 +378,7 @@ def summarize_text(
                     )
                 failures.append(f"{name} ({url}): 404 {detail}")
                 logger.info("%s returned 404; trying next endpoint", name)
+                logger.debug("Summary attempt 404 name=%s elapsed_s=%.3f", name, time.monotonic() - attempt_started_at)
                 continue
 
             raise RuntimeError(
@@ -354,6 +386,13 @@ def summarize_text(
             )
 
         if failures:
+            logger.debug(
+                "Summary generation failed after %.3fs base=%s mode=%s attempts=%d",
+                time.monotonic() - started_at,
+                base,
+                mode,
+                len(failures),
+            )
             msg = (
                 f"Could not get a non-empty summary from {base}. Tried: "
                 + "; ".join(failures[:8])
@@ -370,6 +409,12 @@ def summarize_text(
                     "(e.g. a Qwen or Hermes variant you already have), or leave the model empty to use the first in `ollama list`."
                 )
             raise RuntimeError(msg)
+        logger.debug(
+            "Summary generation failed after %.3fs base=%s mode=%s (no endpoints responded)",
+            time.monotonic() - started_at,
+            base,
+            mode,
+        )
         raise RuntimeError(
             f"No LLM endpoint responded on {base}. Set Preferences → Ollama URL and model."
         )

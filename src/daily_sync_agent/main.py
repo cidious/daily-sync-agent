@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 import traceback
 from pathlib import Path
 
 from daily_sync_agent.log_config import setup_logging
+
+logger = logging.getLogger(__name__)
 
 
 def _is_wayland_session() -> bool:
@@ -33,12 +36,15 @@ def _cli_process_media(media: Path, *, debug: bool) -> int:
     from daily_sync_agent.settings import AppConfig
 
     path = media.expanduser().resolve()
+    logger.debug("CLI process mode start media=%s debug=%s", path, debug)
     if not path.is_file():
         print(f"Not a file: {path}", file=sys.stderr)
+        logger.error("CLI process mode failed: not a file (%s)", path)
         return 2
     cfg = AppConfig.load()
     if not cfg.transcribe_speech:
         print("Transcription is disabled in config; skipping AI processing.")
+        logger.debug("CLI process mode skipped AI because transcribe_speech=false")
         return 0
 
     from daily_sync_agent.ai.pipeline import run_transcribe_and_summarize
@@ -50,14 +56,17 @@ def _cli_process_media(media: Path, *, debug: bool) -> int:
         transcript_path, summary_path = run_transcribe_and_summarize(path, out_dir, cfg)
     except Exception as e:
         print(f"Failed: {e}", file=sys.stderr)
+        logger.exception("CLI process mode failed for media=%s", path)
         if debug:
             traceback.print_exc()
         return 1
     print(f"Wrote {transcript_path}")
     if summary_path is not None:
         print(f"Wrote {summary_path}")
+        logger.debug("CLI process mode wrote transcript=%s summary=%s", transcript_path, summary_path)
     else:
         print("Summary generation disabled in config; skipped summary.txt")
+        logger.debug("CLI process mode wrote transcript=%s summary=disabled", transcript_path)
     return 0
 
 
@@ -99,7 +108,9 @@ def main() -> None:
         parser.error("--log-file requires --debug")
 
     if args.command == "process":
-        setup_logging(debug=args.debug, log_file=args.log_file)
+        debug_log_path = setup_logging(debug=args.debug, log_file=args.log_file)
+        if args.debug and debug_log_path is not None:
+            print(f"Debug log file: {debug_log_path}")
         sys.exit(_cli_process_media(args.media, debug=args.debug))
 
     block = _gui_startup_block_reason()

@@ -17,7 +17,7 @@ You can also **process an existing video or audio file** from the command line (
   - **Transcribe speech (Preferences checkbox)** — master AI toggle. When off, recording still saves media files but transcription/summarization are skipped. The app disables all AI controls (Whisper settings, summarization, and low-VRAM mode).
   - **Ollama** (or another local HTTP API) at the URL in Preferences (default `http://127.0.0.1:11434`). Choose the **chat model** from the dropdown (installed models from your Ollama server), or **“First available”** to use the first model in `ollama list`. The app tries several HTTP endpoints for summarization. Verify the server with `curl -s http://127.0.0.1:11434/api/tags`. Slow local models may need a higher **`ollama_request_timeout_s`** in `config.json` (default is generous). If **Preferences → Summarize the transcripted text** is turned off, Ollama is not used.
   - **faster-whisper** — choose model size, device (auto / CPU / GPU), and compute type in Preferences. If GPU is selected but CUDA libraries are missing, transcription falls back to CPU automatically.
-  - **Low-VRAM mode (Preferences checkbox)** — unload Whisper/Ollama models after each task to free GPU memory; on app exit, Ollama model runners are also unloaded/stopped best-effort.
+  - **Low-VRAM mode (Preferences checkbox)** — unload Whisper/Ollama models after each task to free GPU memory. Before summarization starts, the app drops Whisper transcription objects and, when `nvidia-smi` is available, waits for this process’s NVIDIA VRAM usage to fall so Ollama does not start competing with the just-finished Whisper load. On app exit, Ollama model runners are also unloaded/stopped best-effort.
 
 ### Whisper (faster-whisper) models
 
@@ -122,7 +122,7 @@ Use **`daily-sync-agent gui`** to start the tray explicitly; with **no** subcomm
 
 ### Debug mode (verbose log file)
 
-For the **tray app**, run with **`--debug`** to write **DEBUG**-level logs (app events, ffmpeg argv, AI pipeline steps, **httpx** traffic, Qt messages) to a file under `~/.cache/daily-sync-agent/logs/`, named `app-YYYYMMDD-HHMMSS.log` by default:
+For the **tray app** and **CLI process mode**, run with **`--debug`** to write **DEBUG**-level logs (app events, ffmpeg argv, AI pipeline steps, Whisper model/device/compute-type + elapsed timings, summary endpoint/model + elapsed timings, **httpx** traffic, Qt messages) to a file under `~/.cache/daily-sync-agent/logs/`, named `app-YYYYMMDD-HHMMSS.log` by default:
 
 ```bash
 daily-sync-agent --debug

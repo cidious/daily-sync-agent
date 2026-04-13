@@ -25,16 +25,16 @@
 - Optional helpers: `xdotool` and `xwininfo` for window picking/geometry, with Xlib fallback in `capture/window_x11.py`.
 - LLM integration is endpoint-flexible in `ai/summarize.py`: tries Ollama `/api/chat` + `/api/generate`, then OpenAI-compatible and `llama.cpp`-style endpoints when server is not Ollama.
 - Whisper integration (`faster-whisper`) includes CUDA->CPU fallback on runtime/VRAM failures; preserve this behavior when modifying transcription.
-- Optional low-VRAM cleanup uses both HTTP (`keep_alive: 0`, `/api/ps`) and best-effort `ollama stop` CLI calls (`ai/summarize.py`).
+- Optional low-VRAM cleanup uses both HTTP (`keep_alive: 0`, `/api/ps`) and best-effort `ollama stop` CLI calls (`ai/summarize.py`); Whisper cleanup in `ai/transcribe.py` also drops transcription objects and, when `nvidia-smi` is available, waits for this process’s NVIDIA VRAM usage to fall before summary requests begin.
 
 ## Project-specific conventions
 - Keep work local-first and resilient: failures often degrade gracefully (e.g., missing audio device list, non-zero ffmpeg exit with existing output, model fallback logic).
 - Settings are user-facing and persisted immediately via `AppConfig.save()`; UI changes in Preferences should round-trip through config fields.
 - Audio mode semantics are strict (`AudioMode.MIX`, `MONITOR`, `MIC`) and determine ffmpeg input indexing/filter graph; update `audio/devices.py` and `capture/ffmpeg.py` together.
-- Debug logging is file-based only when `--debug` is enabled (`log_config.setup_logging`); includes `httpx/httpcore` + Qt bridge.
+- Debug logging is file-based only when `--debug` is enabled (`log_config.setup_logging`) for both GUI and `process` mode; includes Whisper/summarization stage details + timing, `httpx/httpcore`, and Qt bridge.
 - `transcribe_speech` controls all AI options in Preferences; when off, Whisper/summarization/low-VRAM controls are disabled and summarization is forced off on save.
 - `run_transcribe_and_summarize()` must keep optional-summary semantics: always write `transcript.txt`, and return/write `summary.txt` only when `summarize_transcript` is enabled.
-- `unload_models_after_task` must propagate through both transcription and summarization code paths (including Ollama keep-alive behavior).
+- `unload_models_after_task` must propagate through both transcription and summarization code paths (including Whisper VRAM-release waiting in `ai/transcribe.py` and Ollama keep-alive behavior).
 
 ## Developer workflows
 - Install deps (recommended): `./scripts/install-system-dependencies.sh --venv`.

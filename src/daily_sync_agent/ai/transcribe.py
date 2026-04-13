@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
 from pathlib import Path
+import subprocess
+import time
 
 from daily_sync_agent.ai.audio_decode import load_audio_ffmpeg_mono_f32
 from daily_sync_agent.ai.whisper_models import normalize_whisper_device
@@ -12,6 +15,103 @@ from daily_sync_agent.ai.whisper_models import normalize_whisper_device
 logger = logging.getLogger(__name__)
 
 _HALLUCINATION_SILENCE_THRESHOLD_S = 2.0
+_LOW_VRAM_RELEASE_TIMEOUT_S = 15.0
+_LOW_VRAM_RELEASE_POLL_S = 0.25
+_LOW_VRAM_VERIFY_MIN_USED_MIB = 512
+_LOW_VRAM_RESIDUAL_TARGET_MIB = 128
+
+
+def _current_process_nvidia_vram_mib(*, pid: int | None = None) -> int | None:
+    """Best-effort NVIDIA VRAM usage for the current PID, or ``None`` when unavailable."""
+    target_pid = os.getpid() if pid is None else pid
+    try:
+        proc = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,used_gpu_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, PermissionError) as e:
+        logger.debug("Low-VRAM cleanup: nvidia-smi unavailable: %s", e)
+        return None
+    except Exception as e:
+        logger.debug("Low-VRAM cleanup: could not query nvidia-smi: %s", e)
+        return None
+
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        logger.debug(
+            "Low-VRAM cleanup: nvidia-smi returned %s (%s)",
+            proc.returncode,
+            stderr[:400] if stderr else "empty stderr",
+        )
+        return None
+
+    used_mib = 0
+    saw_pid = False
+    for raw_line in proc.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = [part.strip() for part in line.split(",", 1)]
+        if len(parts) != 2:
+            continue
+        try:
+            row_pid = int(parts[0])
+            row_used_mib = int(parts[1].split()[0])
+        except (ValueError, IndexError):
+            continue
+        if row_pid != target_pid:
+            continue
+        saw_pid = True
+        used_mib += max(0, row_used_mib)
+    return used_mib if saw_pid else 0
+
+
+def _wait_for_whisper_vram_release(
+    before_release_vram_mib: int | None,
+    *,
+    timeout_s: float = _LOW_VRAM_RELEASE_TIMEOUT_S,
+    poll_interval_s: float = _LOW_VRAM_RELEASE_POLL_S,
+) -> bool | None:
+    """Wait until the current PID no longer appears to hold the Whisper model in NVIDIA VRAM."""
+    if before_release_vram_mib is None:
+        logger.debug("Low-VRAM cleanup: VRAM verification unavailable; proceeding after local cleanup")
+        return None
+    if before_release_vram_mib < _LOW_VRAM_VERIFY_MIN_USED_MIB:
+        logger.debug(
+            "Low-VRAM cleanup: current PID GPU usage already low before release (%s MiB)",
+            before_release_vram_mib,
+        )
+        return True
+
+    target_mib = min(_LOW_VRAM_RESIDUAL_TARGET_MIB, max(32, before_release_vram_mib // 4))
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    while True:
+        current_mib = _current_process_nvidia_vram_mib()
+        if current_mib is None:
+            logger.debug("Low-VRAM cleanup: could not re-check current PID GPU usage after Whisper cleanup")
+            return None
+        if current_mib <= target_mib:
+            logger.debug(
+                "Low-VRAM cleanup: current PID GPU usage dropped from %s MiB to %s MiB before next AI task",
+                before_release_vram_mib,
+                current_mib,
+            )
+            return True
+        if time.monotonic() >= deadline:
+            logger.warning(
+                "Low-VRAM cleanup: current PID still uses about %s MiB of NVIDIA VRAM after waiting %.1fs for Whisper to unload",
+                current_mib,
+                timeout_s,
+            )
+            return False
+        time.sleep(max(0.01, poll_interval_s))
 
 
 def _transcribe_kwargs() -> dict[str, object]:
@@ -73,8 +173,21 @@ def _transcribe_once(
 ) -> str:
     from faster_whisper import WhisperModel
 
+    started_at = time.monotonic()
     model = None
+    audio = None
+    segments = None
+    info = None
+    segment_count = 0
+    transcript = ""
     try:
+        logger.debug(
+            "Whisper transcription started model=%s device=%s compute_type=%s unload_after_task=%s",
+            model_size,
+            device,
+            compute_type,
+            unload_model_after_task,
+        )
         model = WhisperModel(model_size, device=device, compute_type=compute_type)
         sr = model.feature_extractor.sampling_rate
         # Decode with ffmpeg + numpy so we never hit faster-whisper's PyAV path (can crash with
@@ -88,16 +201,50 @@ def _transcribe_once(
             compute_type,
             kwargs,
         )
-        segments, _info = model.transcribe(audio, **kwargs)
+        infer_started_at = time.monotonic()
+        segments, info = model.transcribe(audio, **kwargs)
         parts: list[str] = []
         for seg in segments:
             parts.append(seg.text.strip())
-        return "\n".join(parts).strip()
+            segment_count += 1
+        transcript = "\n".join(parts).strip()
+        infer_elapsed_s = time.monotonic() - infer_started_at
+        logger.debug(
+            "Whisper transcription finished model=%s device=%s compute_type=%s infer_s=%.3f segments=%d chars=%d",
+            model_size,
+            device,
+            compute_type,
+            infer_elapsed_s,
+            segment_count,
+            len(transcript),
+        )
+        return transcript
     finally:
-        if unload_model_after_task and model is not None:
+        if unload_model_after_task:
             logger.debug("Releasing Whisper model resources after transcription task")
-            del model
+            before_release_vram_mib = None
+            if device in ("auto", "cuda"):
+                before_release_vram_mib = _current_process_nvidia_vram_mib()
+                if before_release_vram_mib is not None:
+                    logger.debug(
+                        "Low-VRAM cleanup: current PID uses %s MiB of NVIDIA VRAM before Whisper release",
+                        before_release_vram_mib,
+                    )
+            segments = None
+            info = None
+            audio = None
+            model = None
             gc.collect()
+            if device in ("auto", "cuda"):
+                _wait_for_whisper_vram_release(before_release_vram_mib)
+        elapsed_s = time.monotonic() - started_at
+        logger.debug(
+            "Whisper stage completed model=%s device=%s compute_type=%s total_s=%.3f",
+            model_size,
+            device,
+            compute_type,
+            elapsed_s,
+        )
 
 
 def transcribe_file(
@@ -109,14 +256,33 @@ def transcribe_file(
     unload_model_after_task: bool = False,
 ) -> str:
     dev = normalize_whisper_device(device)
+    started_at = time.monotonic()
+    logger.debug(
+        "Whisper transcribe_file start audio=%s model=%s requested_device=%s resolved_device=%s compute_type=%s unload_after_task=%s",
+        audio_path,
+        model_size,
+        device,
+        dev,
+        compute_type,
+        unload_model_after_task,
+    )
     try:
-        return _transcribe_once(
+        text = _transcribe_once(
             audio_path,
             model_size=model_size,
             device=dev,
             compute_type=compute_type,
             unload_model_after_task=unload_model_after_task,
         )
+        logger.debug(
+            "Whisper transcribe_file success model=%s device=%s compute_type=%s total_s=%.3f chars=%d",
+            model_size,
+            dev,
+            compute_type,
+            time.monotonic() - started_at,
+            len(text),
+        )
+        return text
     except (RuntimeError, OSError) as e:
         if dev not in ("cuda", "auto"):
             raise
@@ -129,10 +295,18 @@ def transcribe_file(
             e,
             cpu_ct,
         )
-        return _transcribe_once(
+        text = _transcribe_once(
             audio_path,
             model_size=model_size,
             device="cpu",
             compute_type=cpu_ct,
             unload_model_after_task=unload_model_after_task,
         )
+        logger.debug(
+            "Whisper transcribe_file success after CPU fallback model=%s fallback_compute_type=%s total_s=%.3f chars=%d",
+            model_size,
+            cpu_ct,
+            time.monotonic() - started_at,
+            len(text),
+        )
+        return text
