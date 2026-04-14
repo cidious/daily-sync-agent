@@ -767,6 +767,8 @@ class TrayApplication(QWidget):
         chk_unload_models.setChecked(cfg.unload_models_after_task)
         chk_diarize = QCheckBox("Enable speaker diarization (Pyannote)")
         chk_diarize.setChecked(cfg.diarize_speakers)
+        chk_identify = QCheckBox("Speaker identification")
+        chk_identify.setChecked(cfg.identify_speakers)
         e_hf_token = QLineEdit(cfg.huggingface_token)
         e_hf_token.setEchoMode(QLineEdit.EchoMode.Password)
         e_hf_token.setPlaceholderText("Get token from huggingface.co/settings/tokens (keep private)")
@@ -781,6 +783,7 @@ class TrayApplication(QWidget):
             ai_enabled = chk_transcribe.isChecked()
             summarize_enabled = ai_enabled and chk_summarize.isChecked()
             diarize_enabled = ai_enabled
+            identify_enabled = diarize_enabled and chk_diarize.isChecked()
 
             combo_whisper.setEnabled(ai_enabled)
             btn_whisper_refresh.setEnabled(ai_enabled)
@@ -790,7 +793,7 @@ class TrayApplication(QWidget):
             chk_unload_models.setEnabled(ai_enabled)
             chk_diarize.setEnabled(diarize_enabled)
             e_hf_token.setEnabled(diarize_enabled and chk_diarize.isChecked())
-
+            chk_identify.setEnabled(identify_enabled)
             e_ollama.setEnabled(summarize_enabled)
             combo_model.setEnabled(summarize_enabled)
             btn_refresh_models.setEnabled(summarize_enabled)
@@ -808,6 +811,7 @@ class TrayApplication(QWidget):
         lay.addRow("Whisper device", combo_whisper_dev)
         lay.addRow("Whisper compute type", combo_whisper_ct)
         lay.addRow("Speaker diarization", chk_diarize)
+        lay.addRow("Speaker identification", chk_identify)
         lay.addRow("HuggingFace token", e_hf_token)
         add_separator()
         lay.addRow("Summarization", chk_summarize)
@@ -829,6 +833,9 @@ class TrayApplication(QWidget):
             smd = combo_summary.currentData()
             self._config.summary_mode = str(smd) if smd else "general"
             self._config.diarize_speakers = chk_diarize.isChecked() if self._config.transcribe_speech else False
+            self._config.identify_speakers = (
+                chk_identify.isChecked() if (self._config.transcribe_speech and self._config.diarize_speakers) else False
+            )
             self._config.huggingface_token = e_hf_token.text().strip()
             wm = combo_whisper.currentData()
             self._config.whisper_model = wm.strip() if isinstance(wm, str) and wm.strip() else "base"

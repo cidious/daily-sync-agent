@@ -5,6 +5,7 @@
 set -euo pipefail
 
 FAMILY="auto"            # auto|qwen|gemma3|mistral-small|mistral-nemo|llama
+PINNED_MODEL=""          # exact model ref, e.g. qwen2.5:14b
 ALLOW_CPU_OFFLOAD=0       # 1 = allow selecting a model larger than fully fitting VRAM
 PREFER_BIGGER=0           # 1 = with offload enabled, bias to next larger tier
 CTX_TOKENS=32768          # long meetings/transcripts
@@ -21,6 +22,7 @@ Detect hardware and install a long-context summarization model alias for daily-s
 
 Options:
   --family <name>              Model family: auto|qwen|gemma3|mistral-small|mistral-nemo|llama
+  --model <name:tag>           Pin exact model (overrides --family/auto tier selection)
   --allow-cpu-offload          Allow selecting models larger than VRAM (partial GPU + CPU offload)
   --prefer-bigger              With --allow-cpu-offload, prefer next larger tier for better quality
   --ctx <tokens>               Context size for Modelfile (default: 32768)
@@ -33,6 +35,7 @@ Options:
 Examples:
   ./scripts/install-ollama-summarizer.sh
   ./scripts/install-ollama-summarizer.sh --family gemma3 --allow-cpu-offload --prefer-bigger
+  ./scripts/install-ollama-summarizer.sh --model qwen2.5:14b --allow-cpu-offload
   ./scripts/install-ollama-summarizer.sh --dry-run --family auto --ctx 32768
 EOF
 }
@@ -42,6 +45,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --family) FAMILY="${2:-}"; shift ;;
+    --model) PINNED_MODEL="${2:-}"; shift ;;
     --allow-cpu-offload) ALLOW_CPU_OFFLOAD=1 ;;
     --prefer-bigger) PREFER_BIGGER=1 ;;
     --ctx) CTX_TOKENS="${2:-}"; shift ;;
@@ -63,6 +67,14 @@ esac
 if [[ ! "$CTX_TOKENS" =~ ^[0-9]+$ ]] || [[ "$CTX_TOKENS" -lt 8192 ]]; then
   echo "--ctx must be an integer >= 8192" >&2
   exit 1
+fi
+
+if [[ -n "$PINNED_MODEL" ]]; then
+  PINNED_MODEL="${PINNED_MODEL//[[:space:]]/}"
+  if [[ -z "$PINNED_MODEL" || "$PINNED_MODEL" != *:* ]]; then
+    echo "--model must be in form name:tag (example: qwen2.5:14b)" >&2
+    exit 1
+  fi
 fi
 
 if [[ -n "$BASE_URL" ]]; then
@@ -176,29 +188,53 @@ select_next_larger() {
 read -r GPU_VENDOR VRAM_MB <<<"$(probe_gpu)"
 VRAM_GB=$((VRAM_MB / 1024))
 
-BEST_ROW="$(select_best_fit "$FAMILY" "$VRAM_GB")"
-IFS=':' read -r SELECTED_FAMILY BASE_MODEL BASE_TAG PARAM_B LAYERS NEED_GB <<<"$BEST_ROW"
+SELECTED_FAMILY="manual"
+BASE_MODEL=""
+BASE_TAG=""
+PARAM_B=""
+LAYERS=0
+NEED_GB=0
+BASE_REF=""
 
-if [[ "$ALLOW_CPU_OFFLOAD" -eq 1 && "$PREFER_BIGGER" -eq 1 ]]; then
-  BIGGER_ROW="$(select_next_larger "$BEST_ROW" "$SELECTED_FAMILY")"
-  IFS=':' read -r _f _m _t _p _l _n <<<"$BIGGER_ROW"
-  SELECTED_FAMILY="$_f"
-  BASE_MODEL="$_m"
-  BASE_TAG="$_t"
-  PARAM_B="$_p"
-  LAYERS="$_l"
-  NEED_GB="$_n"
+if [[ -n "$PINNED_MODEL" ]]; then
+  BASE_REF="$PINNED_MODEL"
+  for row in "${CANDIDATES[@]}"; do
+    IFS=':' read -r f model tag pb layers need <<<"$row"
+    if [[ "${model}:${tag}" == "$BASE_REF" ]]; then
+      SELECTED_FAMILY="$f"
+      BASE_MODEL="$model"
+      BASE_TAG="$tag"
+      PARAM_B="$pb"
+      LAYERS="$layers"
+      NEED_GB="$need"
+      break
+    fi
+  done
+else
+  BEST_ROW="$(select_best_fit "$FAMILY" "$VRAM_GB")"
+  IFS=':' read -r SELECTED_FAMILY BASE_MODEL BASE_TAG PARAM_B LAYERS NEED_GB <<<"$BEST_ROW"
+
+  if [[ "$ALLOW_CPU_OFFLOAD" -eq 1 && "$PREFER_BIGGER" -eq 1 ]]; then
+    BIGGER_ROW="$(select_next_larger "$BEST_ROW" "$SELECTED_FAMILY")"
+    IFS=':' read -r _f _m _t _p _l _n <<<"$BIGGER_ROW"
+    SELECTED_FAMILY="$_f"
+    BASE_MODEL="$_m"
+    BASE_TAG="$_t"
+    PARAM_B="$_p"
+    LAYERS="$_l"
+    NEED_GB="$_n"
+  fi
+
+  BASE_REF="${BASE_MODEL}:${BASE_TAG}"
 fi
-
-BASE_REF="${BASE_MODEL}:${BASE_TAG}"
 
 NUM_GPU=0
 OFFLOAD_MODE="cpu"
-if [[ "$VRAM_GB" -gt 0 ]]; then
-  if (( VRAM_GB >= NEED_GB )); then
+ if [[ "$VRAM_GB" -gt 0 ]]; then
+  if [[ "$NEED_GB" -gt 0 ]] && (( VRAM_GB >= NEED_GB )); then
     NUM_GPU="$LAYERS"
     OFFLOAD_MODE="full_gpu"
-  elif [[ "$ALLOW_CPU_OFFLOAD" -eq 1 ]]; then
+  elif [[ "$NEED_GB" -gt 0 && "$ALLOW_CPU_OFFLOAD" -eq 1 ]]; then
     # Reserve ~1GB for runtime and map remaining VRAM to layer share.
     local_usable=$((VRAM_GB - 1))
     if (( local_usable < 1 )); then
@@ -212,11 +248,14 @@ if [[ "$VRAM_GB" -gt 0 ]]; then
       NUM_GPU="$LAYERS"
     fi
     OFFLOAD_MODE="partial_gpu_cpu_offload"
-  else
+  elif [[ -n "$PINNED_MODEL" ]]; then
     NUM_GPU=0
-    OFFLOAD_MODE="cpu_due_to_vram_limit"
-  fi
-fi
+    OFFLOAD_MODE="manual_model_default_gpu_layers"
+   else
+     NUM_GPU=0
+     OFFLOAD_MODE="cpu_due_to_vram_limit"
+   fi
+ fi
 
 mkdir -p "$(dirname "$MODEFILE_PATH")"
 cat >"$MODEFILE_PATH" <<EOF
@@ -235,6 +274,9 @@ echo "Detected GPU vendor: $GPU_VENDOR"
 echo "Detected VRAM: ${VRAM_MB} MB (${VRAM_GB} GB)"
 echo "Selected family: $SELECTED_FAMILY"
 echo "Selected base model: $BASE_REF"
+if [[ -n "$PINNED_MODEL" ]]; then
+  echo "Selection mode: pinned (--model)"
+fi
 echo "Offload mode: $OFFLOAD_MODE"
 echo "Generated Modelfile: $MODEFILE_PATH"
 echo "Suggested alias for daily-sync-agent: $MODEL_ALIAS"

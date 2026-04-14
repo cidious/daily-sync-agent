@@ -29,6 +29,18 @@ def output_dir() -> Path:
     return p
 
 
+def speaker_profiles_path() -> Path:
+    p = _xdg_config() / "daily-sync-agent" / "speaker_profiles.npz"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def speaker_names_path() -> Path:
+    p = _xdg_config() / "daily-sync-agent" / "speaker_names.txt"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
 @dataclass
 class AppConfig:
     ollama_base_url: str = "http://127.0.0.1:11434"
@@ -46,6 +58,8 @@ class AppConfig:
     # Pyannote speaker diarization (off by default; requires HF token and model download)
     diarize_speakers: bool = False
     huggingface_token: str = ""  # HF token for accessing Pyannote models
+    # Optional cross-session speaker identification using saved embeddings + editable names.
+    identify_speakers: bool = False
     ffmpeg_fps: int = 25
     display: str = ":0"
     # Preferences dialog geometry (None = use Qt default placement/size)

@@ -9,6 +9,7 @@ from daily_sync_agent.ai.session_date import format_event_date_from_session_dir
 from daily_sync_agent.ai.summarize import summarize_text
 from daily_sync_agent.ai.transcribe import transcribe_file
 from daily_sync_agent.settings import AppConfig
+from daily_sync_agent.settings import speaker_names_path, speaker_profiles_path
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,9 @@ def run_transcribe_and_summarize(
         unload_model_after_task=config.unload_models_after_task,
         diarize=config.diarize_speakers,
         hf_token=config.huggingface_token,
+        identify_speakers=config.identify_speakers,
+        speaker_profiles_path=speaker_profiles_path(),
+        speaker_names_path=speaker_names_path(),
     )
     transcript_path = out_dir / "transcript.txt"
     transcript_path.write_text(text + "\n", encoding="utf-8")

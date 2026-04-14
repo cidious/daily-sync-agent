@@ -172,6 +172,9 @@ def _transcribe_once(
     unload_model_after_task: bool = False,
     diarize: bool = False,
     hf_token: str = "",
+    identify_speakers: bool = False,
+    speaker_profiles_path: Path | None = None,
+    speaker_names_path: Path | None = None,
 ) -> tuple[str, list[dict] | None]:
     """Return (transcript_text, diarization_segments_or_none)."""
     from faster_whisper import WhisperModel
@@ -228,6 +231,27 @@ def _transcribe_once(
                 from daily_sync_agent.ai.diarize import diarize_speakers, merge_diarization_with_transcript
                 dia_result = diarize_speakers(audio_path, hf_token, device=device)
                 diarization_result = dia_result.get("speakers")
+                if identify_speakers and diarization_result and speaker_profiles_path and speaker_names_path:
+                    try:
+                        from daily_sync_agent.ai.speaker_id import (
+                            identify_speakers_from_profiles,
+                            rename_diarization_speakers,
+                        )
+
+                        local_to_name = identify_speakers_from_profiles(
+                            audio_path,
+                            diarization_result,
+                            hf_token=hf_token,
+                            device=device,
+                            profiles_path=speaker_profiles_path,
+                            names_path=speaker_names_path,
+                        )
+                        diarization_result = rename_diarization_speakers(diarization_result, local_to_name)
+                    except Exception as e:
+                        logger.warning(
+                            "Speaker identification failed; continuing with diarization labels: %s",
+                            e,
+                        )
                 # Merge speaker info with transcript
                 transcript = merge_diarization_with_transcript(segments_data, diarization_result)
                 logger.debug(
@@ -287,6 +311,9 @@ def transcribe_file(
     unload_model_after_task: bool = False,
     diarize: bool = False,
     hf_token: str = "",
+    identify_speakers: bool = False,
+    speaker_profiles_path: Path | None = None,
+    speaker_names_path: Path | None = None,
 ) -> str:
     dev = normalize_whisper_device(device)
     started_at = time.monotonic()
@@ -309,6 +336,9 @@ def transcribe_file(
             unload_model_after_task=unload_model_after_task,
             diarize=diarize,
             hf_token=hf_token,
+            identify_speakers=identify_speakers,
+            speaker_profiles_path=speaker_profiles_path,
+            speaker_names_path=speaker_names_path,
         )
         logger.debug(
             "Whisper transcribe_file success model=%s device=%s compute_type=%s total_s=%.3f chars=%d",
@@ -339,6 +369,9 @@ def transcribe_file(
             unload_model_after_task=unload_model_after_task,
             diarize=diarize,
             hf_token=hf_token,
+            identify_speakers=identify_speakers,
+            speaker_profiles_path=speaker_profiles_path,
+            speaker_names_path=speaker_names_path,
         )
         logger.debug(
             "Whisper transcribe_file success after CPU fallback model=%s fallback_compute_type=%s total_s=%.3f chars=%d",

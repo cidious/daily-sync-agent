@@ -63,6 +63,7 @@ Useful flags:
 ```bash
 ./scripts/install-ollama-summarizer.sh --dry-run
 ./scripts/install-ollama-summarizer.sh --family gemma3
+./scripts/install-ollama-summarizer.sh --model qwen2.5:14b --allow-cpu-offload
 ./scripts/install-ollama-summarizer.sh --allow-cpu-offload --prefer-bigger
 ./scripts/install-ollama-summarizer.sh --ctx 32768 --alias daily-sync-summary
 ```
@@ -188,6 +189,7 @@ Enable **speaker labels** in transcripts for multi-speaker recordings (meetings,
 3. **Enable in Preferences**:
    - Open **Preferences** (right-click tray → Preferences)
    - Check **"Speaker diarization (Pyannote)"**
+   - Optional: check **"Speaker identification"** to persist speaker embeddings across sessions and replace generic labels with names
    - Paste your HuggingFace token in the **"HuggingFace token"** field
    - Save
 
@@ -195,12 +197,15 @@ Enable **speaker labels** in transcripts for multi-speaker recordings (meetings,
    - Record normally. Transcripts will include speaker labels: `[Speaker_1] Good morning!` / `[Speaker_2] Hi there!`
    - Audio is automatically converted to **16 kHz mono WAV** for best diarization accuracy (Pyannote is sample-rate sensitive)
    - Diarization uses the same **Whisper device** preference from Preferences (`Auto-detect`, `CPU`, `GPU (CUDA)`). In `Auto-detect`, CUDA is used when available.
+   - With **Speaker identification** enabled, the app picks the longest clean segment per detected speaker, computes embeddings, and matches them against saved speaker profiles.
+   - Edit `~/.config/daily-sync-agent/speaker_names.txt` to rename profile IDs (for example `speaker_01: Alice`) and future transcripts will use those names.
    - First transcription may take longer on initial model load; subsequent runs are faster
 
 **Notes:**
 - Diarization requires Pyannote 3.1 (installed by `install-pyannote-models.sh`)
 - Keep your HuggingFace token **private** in config (treated as password in Preferences UI)
 - Low-VRAM mode applies: models are unloaded after each task if enabled
+- Speaker profiles are stored in `~/.config/daily-sync-agent/speaker_profiles.npz`; editable names are stored in `~/.config/daily-sync-agent/speaker_names.txt`.
 - Token is stored in `~/.config/daily-sync-agent/config.json`; back up securely if using automated deployments
 
 

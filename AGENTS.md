@@ -12,6 +12,7 @@
 - `src/daily_sync_agent/capture/ffmpeg.py`: ffmpeg argv builder + subprocess lifecycle (`RecordingProcess`).
 - `src/daily_sync_agent/audio/devices.py`: `pactl`-based device discovery and Pulse input resolution by `AudioMode`.
 - `src/daily_sync_agent/ai/pipeline.py`: orchestrates `transcribe_file()` then `summarize_text()` and writes outputs.
+- `src/daily_sync_agent/ai/speaker_id.py`: optional speaker-identification profiles (embedding matching + name mapping file) applied after diarization.
 - `src/daily_sync_agent/settings.py`: persistent user config in `~/.config/daily-sync-agent/config.json`; log/output dirs from XDG paths.
 
 ## Data flow that matters
@@ -19,6 +20,7 @@
 - AI flow is intentionally audio-first: transcription always reads FLAC/audio (`ai/transcribe.py`) rather than video.
 - `run_transcribe_and_summarize()` writes `transcript.txt` before summary; summary prompt can include session date parsed from folder name (`ai/session_date.py`).
 - `transcribe_speech` is a master AI toggle: when disabled, GUI recording still saves media but skips AI queueing, and `process` mode exits after reporting AI is disabled.
+- When `identify_speakers` is enabled, diarization speakers are matched against persisted embeddings (`speaker_profiles.npz`) and transcript labels are replaced using editable names from `speaker_names.txt`.
 
 ## Integration points / external dependencies
 - Hard runtime deps: `ffmpeg`, `pactl`, X11 session (`DISPLAY`), Python 3.11+.
@@ -34,6 +36,7 @@
 - Debug logging is file-based only when `--debug` is enabled (`log_config.setup_logging`) for both GUI and `process` mode; includes Whisper/summarization stage details + timing, `httpx/httpcore`, and Qt bridge.
 - `transcribe_speech` controls all AI options in Preferences; when off, Whisper/summarization/low-VRAM controls are disabled and summarization is forced off on save.
 - Speaker diarization follows the Whisper device preference (`auto`/`cpu`/`cuda`): `auto` prefers CUDA when available, and explicit CUDA requests degrade to CPU when CUDA is unavailable.
+- Speaker identification depends on diarization and HuggingFace token: keep it opt-in (`identify_speakers` default `False`), and preserve editable `speaker_id: name` text mapping semantics.
 - `run_transcribe_and_summarize()` must keep optional-summary semantics: always write `transcript.txt`, and return/write `summary.txt` only when `summarize_transcript` is enabled.
 - `unload_models_after_task` must propagate through both transcription and summarization code paths (including Whisper VRAM-release waiting in `ai/transcribe.py` and Ollama keep-alive behavior).
 
@@ -52,3 +55,4 @@
 - If touching startup/CLI dispatch: keep Wayland guard behavior (`gui` blocked, `process` allowed).
 - If touching low-VRAM mode: keep `unload_models_after_task` wiring end-to-end (`ai/pipeline.py`, `ai/transcribe.py`, `ai/summarize.py`, and tray shutdown cleanup).
 - If touching Preferences AI controls: keep `transcribe_speech` as the master toggle for enabling/disabling all AI-related controls and processing.
+- If touching speaker identification: preserve longest clean-segment selection, profile persistence in `~/.config/daily-sync-agent/speaker_profiles.npz`, and editable names in `~/.config/daily-sync-agent/speaker_names.txt`.
