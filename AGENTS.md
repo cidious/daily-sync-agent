@@ -33,6 +33,7 @@
 - Audio mode semantics are strict (`AudioMode.MIX`, `MONITOR`, `MIC`) and determine ffmpeg input indexing/filter graph; update `audio/devices.py` and `capture/ffmpeg.py` together.
 - Debug logging is file-based only when `--debug` is enabled (`log_config.setup_logging`) for both GUI and `process` mode; includes Whisper/summarization stage details + timing, `httpx/httpcore`, and Qt bridge.
 - `transcribe_speech` controls all AI options in Preferences; when off, Whisper/summarization/low-VRAM controls are disabled and summarization is forced off on save.
+- Speaker diarization follows the Whisper device preference (`auto`/`cpu`/`cuda`): `auto` prefers CUDA when available, and explicit CUDA requests degrade to CPU when CUDA is unavailable.
 - `run_transcribe_and_summarize()` must keep optional-summary semantics: always write `transcript.txt`, and return/write `summary.txt` only when `summarize_transcript` is enabled.
 - `unload_models_after_task` must propagate through both transcription and summarization code paths (including Whisper VRAM-release waiting in `ai/transcribe.py` and Ollama keep-alive behavior).
 

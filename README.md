@@ -162,6 +162,47 @@ daily-sync-agent --debug
 Use **`--log-file /path/to/app.log`** with **`--debug`** to choose the path. Per-session **ffmpeg** logs are still written as `ffmpeg-<timestamp>.log` in the same directory; in debug mode the ffmpeg process uses `-loglevel verbose`.
 
 ## Usage
+### Speaker diarization with Pyannote (optional)
+
+Enable **speaker labels** in transcripts for multi-speaker recordings (meetings, interviews, podcasts). When enabled, Whisper transcription is combined with speaker detection to label each segment with a speaker ID.
+
+**Setup:**
+
+1. **Get a HuggingFace token** (free):
+   - Go to [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+   - Click **"New token"** → name it `daily-sync-agent`
+   - Set **Role** to `read`
+   - Click **"Create token"** and copy it
+   - Visit [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1) and accept the model license (one-time)
+
+2. **Download and cache the model**:
+   ```bash
+   ./scripts/install-pyannote-models.sh --hf-token <your-token>
+   ```
+   Or set the token in your environment:
+   ```bash
+   export HF_TOKEN="hf_xxxxx..."
+   ./scripts/install-pyannote-models.sh
+   ```
+
+3. **Enable in Preferences**:
+   - Open **Preferences** (right-click tray → Preferences)
+   - Check **"Speaker diarization (Pyannote)"**
+   - Paste your HuggingFace token in the **"HuggingFace token"** field
+   - Save
+
+4. **Use it**:
+   - Record normally. Transcripts will include speaker labels: `[Speaker_1] Good morning!` / `[Speaker_2] Hi there!`
+   - Audio is automatically converted to **16 kHz mono WAV** for best diarization accuracy (Pyannote is sample-rate sensitive)
+   - Diarization uses the same **Whisper device** preference from Preferences (`Auto-detect`, `CPU`, `GPU (CUDA)`). In `Auto-detect`, CUDA is used when available.
+   - First transcription may take longer on initial model load; subsequent runs are faster
+
+**Notes:**
+- Diarization requires Pyannote 3.1 (installed by `install-pyannote-models.sh`)
+- Keep your HuggingFace token **private** in config (treated as password in Preferences UI)
+- Low-VRAM mode applies: models are unloaded after each task if enabled
+- Token is stored in `~/.config/daily-sync-agent/config.json`; back up securely if using automated deployments
+
 
 1. Use the tray icon → **Select window…** and click the target window (or use `xdotool` if installed). The capture **rectangle is saved** in `config.json` (`last_capture_*` fields) so you can **Start recording** after restarting the app without picking again. **Left-click** the tray icon to **flash an on-screen frame** around the saved region (where the desktop sends a tray “activate” event). **Shift+left-click** toggles recording (**start** when idle, **stop** when already recording). **Right-click** opens the menu.
 2. Choose **Audio capture mode**:

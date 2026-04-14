@@ -765,6 +765,11 @@ class TrayApplication(QWidget):
         chk_summarize.setChecked(cfg.summarize_transcript)
         chk_unload_models = QCheckBox("Unload Whisper/Ollama models after each task")
         chk_unload_models.setChecked(cfg.unload_models_after_task)
+        chk_diarize = QCheckBox("Enable speaker diarization (Pyannote)")
+        chk_diarize.setChecked(cfg.diarize_speakers)
+        e_hf_token = QLineEdit(cfg.huggingface_token)
+        e_hf_token.setEchoMode(QLineEdit.EchoMode.Password)
+        e_hf_token.setPlaceholderText("Get token from huggingface.co/settings/tokens (keep private)")
         combo_summary = QComboBox()
         combo_summary.addItem("General (short paragraph)", "general")
         combo_summary.addItem("Daily scrum (structured)", "daily_scrum")
@@ -775,6 +780,7 @@ class TrayApplication(QWidget):
         def sync_ai_controls() -> None:
             ai_enabled = chk_transcribe.isChecked()
             summarize_enabled = ai_enabled and chk_summarize.isChecked()
+            diarize_enabled = ai_enabled
 
             combo_whisper.setEnabled(ai_enabled)
             btn_whisper_refresh.setEnabled(ai_enabled)
@@ -782,6 +788,8 @@ class TrayApplication(QWidget):
             combo_whisper_ct.setEnabled(ai_enabled)
             chk_summarize.setEnabled(ai_enabled)
             chk_unload_models.setEnabled(ai_enabled)
+            chk_diarize.setEnabled(diarize_enabled)
+            e_hf_token.setEnabled(diarize_enabled and chk_diarize.isChecked())
 
             e_ollama.setEnabled(summarize_enabled)
             combo_model.setEnabled(summarize_enabled)
@@ -790,6 +798,7 @@ class TrayApplication(QWidget):
 
         chk_transcribe.toggled.connect(lambda _checked: sync_ai_controls())
         chk_summarize.toggled.connect(lambda _checked: sync_ai_controls())
+        chk_diarize.toggled.connect(lambda _checked: sync_ai_controls())
         sync_ai_controls()
 
         lay.addRow("Video FPS", e_fps)
@@ -798,6 +807,8 @@ class TrayApplication(QWidget):
         lay.addRow("Whisper model", row_whisper)
         lay.addRow("Whisper device", combo_whisper_dev)
         lay.addRow("Whisper compute type", combo_whisper_ct)
+        lay.addRow("Speaker diarization", chk_diarize)
+        lay.addRow("HuggingFace token", e_hf_token)
         add_separator()
         lay.addRow("Summarization", chk_summarize)
         lay.addRow("Summary format", combo_summary)
@@ -817,6 +828,8 @@ class TrayApplication(QWidget):
             self._config.summarize_transcript = chk_summarize.isChecked() if self._config.transcribe_speech else False
             smd = combo_summary.currentData()
             self._config.summary_mode = str(smd) if smd else "general"
+            self._config.diarize_speakers = chk_diarize.isChecked() if self._config.transcribe_speech else False
+            self._config.huggingface_token = e_hf_token.text().strip()
             wm = combo_whisper.currentData()
             self._config.whisper_model = wm.strip() if isinstance(wm, str) and wm.strip() else "base"
             wdv = combo_whisper_dev.currentData()

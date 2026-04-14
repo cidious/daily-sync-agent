@@ -43,6 +43,9 @@ class AppConfig:
     whisper_compute_type: str = "default"
     # Free model memory aggressively after each AI task (useful on small VRAM GPUs).
     unload_models_after_task: bool = False
+    # Pyannote speaker diarization (off by default; requires HF token and model download)
+    diarize_speakers: bool = False
+    huggingface_token: str = ""  # HF token for accessing Pyannote models
     ffmpeg_fps: int = 25
     display: str = ":0"
     # Preferences dialog geometry (None = use Qt default placement/size)

@@ -170,7 +170,10 @@ def _transcribe_once(
     device: str,
     compute_type: str,
     unload_model_after_task: bool = False,
-) -> str:
+    diarize: bool = False,
+    hf_token: str = "",
+) -> tuple[str, list[dict] | None]:
+    """Return (transcript_text, diarization_segments_or_none)."""
     from faster_whisper import WhisperModel
 
     started_at = time.monotonic()
@@ -180,13 +183,15 @@ def _transcribe_once(
     info = None
     segment_count = 0
     transcript = ""
+    diarization_result = None
     try:
         logger.debug(
-            "Whisper transcription started model=%s device=%s compute_type=%s unload_after_task=%s",
+            "Whisper transcription started model=%s device=%s compute_type=%s unload_after_task=%s diarize=%s",
             model_size,
             device,
             compute_type,
             unload_model_after_task,
+            diarize,
         )
         model = WhisperModel(model_size, device=device, compute_type=compute_type)
         sr = model.feature_extractor.sampling_rate
@@ -204,21 +209,47 @@ def _transcribe_once(
         infer_started_at = time.monotonic()
         segments, info = model.transcribe(audio, **kwargs)
         parts: list[str] = []
+        segments_data: list[dict] = []
         for seg in segments:
-            parts.append(seg.text.strip())
+            text = seg.text.strip()
+            if text:
+                parts.append(text)
+            segments_data.append({
+                "text": text,
+                "start": seg.start,
+                "end": seg.end,
+            })
             segment_count += 1
         transcript = "\n".join(parts).strip()
+
+        # Optional diarization: extract speaker information
+        if diarize and hf_token:
+            try:
+                from daily_sync_agent.ai.diarize import diarize_speakers, merge_diarization_with_transcript
+                dia_result = diarize_speakers(audio_path, hf_token, device=device)
+                diarization_result = dia_result.get("speakers")
+                # Merge speaker info with transcript
+                transcript = merge_diarization_with_transcript(segments_data, diarization_result)
+                logger.debug(
+                    "Diarization merged with transcript speakers=%d",
+                    dia_result.get("num_speakers_detected", 0),
+                )
+            except Exception as e:
+                logger.warning("Diarization failed; continuing with plain transcript: %s", e)
+                diarization_result = None
+
         infer_elapsed_s = time.monotonic() - infer_started_at
         logger.debug(
-            "Whisper transcription finished model=%s device=%s compute_type=%s infer_s=%.3f segments=%d chars=%d",
+            "Whisper transcription finished model=%s device=%s compute_type=%s infer_s=%.3f segments=%d chars=%d diarized=%s",
             model_size,
             device,
             compute_type,
             infer_elapsed_s,
             segment_count,
             len(transcript),
+            diarization_result is not None,
         )
-        return transcript
+        return transcript, diarization_result
     finally:
         if unload_model_after_task:
             logger.debug("Releasing Whisper model resources after transcription task")
@@ -254,25 +285,30 @@ def transcribe_file(
     device: str = "auto",
     compute_type: str = "default",
     unload_model_after_task: bool = False,
+    diarize: bool = False,
+    hf_token: str = "",
 ) -> str:
     dev = normalize_whisper_device(device)
     started_at = time.monotonic()
     logger.debug(
-        "Whisper transcribe_file start audio=%s model=%s requested_device=%s resolved_device=%s compute_type=%s unload_after_task=%s",
+        "Whisper transcribe_file start audio=%s model=%s requested_device=%s resolved_device=%s compute_type=%s unload_after_task=%s diarize=%s",
         audio_path,
         model_size,
         device,
         dev,
         compute_type,
         unload_model_after_task,
+        diarize,
     )
     try:
-        text = _transcribe_once(
+        text, _ = _transcribe_once(
             audio_path,
             model_size=model_size,
             device=dev,
             compute_type=compute_type,
             unload_model_after_task=unload_model_after_task,
+            diarize=diarize,
+            hf_token=hf_token,
         )
         logger.debug(
             "Whisper transcribe_file success model=%s device=%s compute_type=%s total_s=%.3f chars=%d",
@@ -295,12 +331,14 @@ def transcribe_file(
             e,
             cpu_ct,
         )
-        text = _transcribe_once(
+        text, _ = _transcribe_once(
             audio_path,
             model_size=model_size,
             device="cpu",
             compute_type=cpu_ct,
             unload_model_after_task=unload_model_after_task,
+            diarize=diarize,
+            hf_token=hf_token,
         )
         logger.debug(
             "Whisper transcribe_file success after CPU fallback model=%s fallback_compute_type=%s total_s=%.3f chars=%d",

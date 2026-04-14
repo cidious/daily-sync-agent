@@ -27,6 +27,8 @@ def run_transcribe_and_summarize(
         device=config.whisper_device,
         compute_type=config.whisper_compute_type,
         unload_model_after_task=config.unload_models_after_task,
+        diarize=config.diarize_speakers,
+        hf_token=config.huggingface_token,
     )
     transcript_path = out_dir / "transcript.txt"
     transcript_path.write_text(text + "\n", encoding="utf-8")
