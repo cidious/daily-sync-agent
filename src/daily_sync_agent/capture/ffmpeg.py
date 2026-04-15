@@ -6,8 +6,9 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from daily_sync_agent.audio.devices import AudioDevices, AudioMode, resolve_pulse_input
-from daily_sync_agent.capture.window_x11 import WindowInfo
+from daily_sync_agent.audio.devices import AudioDevices, AudioMode, resolve_audio_input
+from daily_sync_agent.capture.window_info import WindowInfo
+from daily_sync_agent.platform import is_windows
 
 # libx264 + yuv420p need even width/height; window geometry from X11 can be odd (e.g. 2691x1645).
 _VF_EVEN_YUV420 = "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p"
@@ -31,35 +32,52 @@ def build_ffmpeg_command(
     out: FfmpegPaths,
     ffmpeg_loglevel: str = "info",
 ) -> list[str]:
-    """Full argv for ffmpeg: x11grab + pulse + dual file outputs."""
+    """Full argv for ffmpeg with platform-appropriate desktop + audio capture."""
     geo = f"{win.width}x{win.height}"
-    offset = f"+{win.x},{win.y}"
-    x11 = f"{display}{offset}"
 
-    pulse_args, _ = resolve_pulse_input(
+    audio_args, _ = resolve_audio_input(
         mode,
         playback_sink=playback_sink,
         recording_source=recording_source,
         devices=devices,
     )
 
-    # Inputs: [0] x11grab, [1] pulse (or [1][2] for MIX)
-    cmd: list[str] = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        ffmpeg_loglevel,
-        "-y",
-        "-f",
-        "x11grab",
-        "-framerate",
-        str(fps),
-        "-video_size",
-        geo,
-        "-i",
-        x11,
-        *pulse_args,
-    ]
+    cmd: list[str] = ["ffmpeg", "-hide_banner", "-loglevel", ffmpeg_loglevel, "-y"]
+    if is_windows():
+        cmd.extend(
+            [
+                "-f",
+                "gdigrab",
+                "-framerate",
+                str(fps),
+                "-offset_x",
+                str(win.x),
+                "-offset_y",
+                str(win.y),
+                "-video_size",
+                geo,
+                "-i",
+                "desktop",
+            ]
+        )
+    else:
+        offset = f"+{win.x},{win.y}"
+        x11 = f"{display}{offset}"
+        cmd.extend(
+            [
+                "-f",
+                "x11grab",
+                "-framerate",
+                str(fps),
+                "-video_size",
+                geo,
+                "-i",
+                x11,
+            ]
+        )
+
+    # Inputs: [0] video capture, [1] audio (or [1][2] for MIX)
+    cmd.extend(audio_args)
 
     if mode == AudioMode.MIX:
         # Video: force even dimensions for libx264. Audio: asplit so MKV + FLAC each map a branch once.

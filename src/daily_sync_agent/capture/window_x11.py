@@ -4,18 +4,30 @@ from __future__ import annotations
 
 import re
 import subprocess
-from dataclasses import dataclass
 
 from Xlib import X, display
 
+from daily_sync_agent.capture.window_info import WindowInfo
 
-@dataclass
-class WindowInfo:
-    x: int
-    y: int
-    width: int
-    height: int
-    window_id: int
+
+def _window_title(win) -> str:
+    try:
+        title = win.get_wm_name()
+        if isinstance(title, bytes):
+            title = title.decode("utf-8", errors="replace")
+        title = str(title).strip() if title is not None else ""
+        if title:
+            return title
+    except Exception:
+        pass
+    return f"Window {win.id}"
+
+
+def _title_from_xwininfo(text: str, wid: int) -> str:
+    m = re.search(r'Window id:\s*(?:0x[0-9a-fA-F]+|\d+)\s+"([^"]*)"', text)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    return f"Window {wid}"
 
 
 def _try_xdotool() -> int | None:
@@ -59,7 +71,7 @@ def _geometry_for_window(dpy: display.Display, wid: int) -> WindowInfo:
     tr = win.translate_coords(dpy.screen().root, 0, 0)
     abs_x, abs_y = tr.x, tr.y
     w, h = geom.width, geom.height
-    return WindowInfo(x=abs_x, y=abs_y, width=w, height=h, window_id=wid)
+    return WindowInfo(title=_window_title(win), x=abs_x, y=abs_y, width=w, height=h, window_id=str(wid))
 
 
 def pick_window_x11() -> WindowInfo | None:
@@ -145,7 +157,14 @@ def parse_xwininfo_geometry(text: str, wid: int) -> WindowInfo | None:
             height = int(line.split(":", 1)[1].strip())
     if None in (abs_x, abs_y, width, height):
         return None
-    return WindowInfo(x=abs_x, y=abs_y, width=width, height=height, window_id=wid)
+    return WindowInfo(
+        title=_title_from_xwininfo(text, wid),
+        x=abs_x,
+        y=abs_y,
+        width=width,
+        height=height,
+        window_id=str(wid),
+    )
 
 
 def geometry_after_xdotool(wid: int) -> WindowInfo | None:

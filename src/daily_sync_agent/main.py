@@ -10,11 +10,51 @@ import traceback
 from pathlib import Path
 
 from daily_sync_agent.log_config import setup_logging
+from daily_sync_agent.platform import is_linux, is_windows
 
 logger = logging.getLogger(__name__)
 
 
+def _enable_windows_dpi_awareness() -> None:
+    """Enable per-monitor DPI awareness on Windows to avoid coordinate virtualization."""
+    if not is_windows() or os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        # Prefer the modern per-monitor v2 mode; fall back to older APIs.
+        for ctx in (-4, -3, -2):
+            try:
+                if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(ctx)):
+                    logger.debug("Enabled Windows DPI awareness context=%s", ctx)
+                    return
+            except Exception:
+                continue
+        try:
+            shcore = ctypes.windll.shcore
+            # PROCESS_PER_MONITOR_DPI_AWARE
+            hr = shcore.SetProcessDpiAwareness(2)
+            if hr in (0, 0x80070005):
+                logger.debug("SetProcessDpiAwareness result=0x%x", hr)
+                return
+        except Exception:
+            pass
+        try:
+            if user32.SetProcessDPIAware():
+                logger.debug("Enabled Windows system DPI awareness via SetProcessDPIAware")
+                return
+        except Exception:
+            pass
+        logger.debug("Windows DPI awareness API calls were unavailable or rejected")
+    except Exception as e:
+        logger.debug("Failed enabling Windows DPI awareness: %s", e)
+
+
 def _is_wayland_session() -> bool:
+    """Check if running on Wayland (Linux only)."""
+    if not is_linux():
+        return False
     session_type = os.environ.get("XDG_SESSION_TYPE", "").strip().lower()
     if session_type == "wayland":
         return True
@@ -22,13 +62,18 @@ def _is_wayland_session() -> bool:
 
 
 def _gui_startup_block_reason() -> str | None:
-    if not _is_wayland_session():
+    """Return reason GUI startup is blocked, or None if allowed."""
+    if is_windows():
+        # Windows is fully supported
         return None
-    return (
-        "Wayland session detected. The tray GUI requires an X11 session for window capture in this version.\n"
-        "Use `daily-sync-agent process <media>` for headless transcription/summarization, "
-        "or log in to an X11 session for GUI recording."
-    )
+
+    if is_linux() and _is_wayland_session():
+        return (
+            "Wayland session detected. The tray GUI requires an X11 session for window capture in this version.\n"
+            "Use `daily-sync-agent process <media>` for headless transcription/summarization, "
+            "or log in to an X11 session for GUI recording."
+        )
+    return None
 
 
 def _cli_process_media(media: Path, *, debug: bool) -> int:
@@ -70,12 +115,23 @@ def _cli_process_media(media: Path, *, debug: bool) -> int:
     return 0
 
 
+def _check_required_dependencies() -> str | None:
+    """Check for required system/Python dependencies. Return error message if missing, None if OK."""
+    import shutil
+
+    # ffmpeg is required on all platforms
+    if not shutil.which("ffmpeg"):
+        return "ffmpeg not found on PATH. Install ffmpeg and add to PATH."
+
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="X11 window capture with local transcription and summary.",
+        description="Window capture with local transcription and summary (Linux X11 / Windows).",
         epilog="Global options (--debug, --log-file) must appear before the subcommand, e.g. "
         "daily-sync-agent --debug process ./recording.mkv. "
-        "Note: Wayland sessions are supported for `process` only; the tray GUI requires X11.",
+        "Note: On Linux, Wayland sessions require the `process` subcommand; the tray GUI needs X11.",
     )
     parser.add_argument(
         "--debug",
@@ -107,6 +163,11 @@ def main() -> None:
     if args.log_file is not None and not args.debug:
         parser.error("--log-file requires --debug")
 
+    dep_error = _check_required_dependencies()
+    if dep_error is not None:
+        print(dep_error, file=sys.stderr)
+        sys.exit(2)
+
     if args.command == "process":
         debug_log_path = setup_logging(debug=args.debug, log_file=args.log_file)
         if args.debug and debug_log_path is not None:
@@ -119,6 +180,8 @@ def main() -> None:
         sys.exit(2)
 
     # Tray GUI (default, or explicit `gui`)
+    _enable_windows_dpi_awareness()
+
     from PySide6.QtWidgets import QApplication
 
     from daily_sync_agent.app import TrayApplication
