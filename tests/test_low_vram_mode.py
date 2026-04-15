@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -46,14 +47,27 @@ class LowVramModeTests(unittest.TestCase):
         mock_query.assert_not_called()
 
     @patch("daily_sync_agent.ai.transcribe.time.sleep")
+    @patch("daily_sync_agent.ai.transcribe._tracked_gpu_process_pids", return_value=None)
     @patch(
         "daily_sync_agent.ai.transcribe._current_process_nvidia_vram_mib",
         side_effect=[1024, 96],
     )
-    def test_wait_for_whisper_vram_release_polls_until_usage_drops(self, mock_query, mock_sleep) -> None:
+    def test_wait_for_whisper_vram_release_polls_until_usage_drops(self, mock_query, _mock_tracked, mock_sleep) -> None:
         self.assertTrue(_wait_for_whisper_vram_release(2048, timeout_s=1.0, poll_interval_s=0.01))
         self.assertEqual(mock_query.call_count, 2)
         mock_sleep.assert_called_once_with(0.01)
+
+    @patch("daily_sync_agent.ai.transcribe.time.sleep")
+    @patch("daily_sync_agent.ai.transcribe._tracked_gpu_process_pids", return_value={os.getpid()})
+    @patch("daily_sync_agent.ai.transcribe._current_process_nvidia_vram_mib", return_value=220)
+    def test_wait_for_whisper_vram_release_exits_early_when_child_gpu_workers_are_gone(
+        self,
+        _mock_query,
+        _mock_tracked,
+        mock_sleep,
+    ) -> None:
+        self.assertTrue(_wait_for_whisper_vram_release(6000, timeout_s=30.0, poll_interval_s=0.25))
+        mock_sleep.assert_not_called()
 
     def test_transcribe_once_waits_for_gpu_cleanup_before_returning(self) -> None:
         class FakeWhisperModel:
@@ -61,7 +75,10 @@ class LowVramModeTests(unittest.TestCase):
                 self.feature_extractor = types.SimpleNamespace(sampling_rate=16000)
 
             def transcribe(self, audio, **kwargs):
-                return iter([types.SimpleNamespace(text="hello"), types.SimpleNamespace(text="world")]), {
+                return iter([
+                    types.SimpleNamespace(text="hello", start=0.0, end=0.5),
+                    types.SimpleNamespace(text="world", start=0.5, end=1.0),
+                ]), {
                     "language": "en"
                 }
 
@@ -73,7 +90,8 @@ class LowVramModeTests(unittest.TestCase):
                     side_effect=[1536, 96],
                 ) as mock_query:
                     with patch("daily_sync_agent.ai.transcribe.gc.collect") as mock_gc:
-                        text = _transcribe_once(
+                        with patch("daily_sync_agent.ai.transcribe._best_effort_torch_cuda_release") as mock_cuda_cleanup:
+                            text, diarization = _transcribe_once(
                             Path("/tmp/fake.flac"),
                             model_size="base",
                             device="cuda",
@@ -82,8 +100,10 @@ class LowVramModeTests(unittest.TestCase):
                         )
 
         self.assertEqual(text, "hello\nworld")
+        self.assertIsNone(diarization)
         self.assertEqual(mock_query.call_count, 2)
         mock_gc.assert_called_once()
+        mock_cuda_cleanup.assert_called_once()
 
     def test_transcribe_once_skips_gpu_polling_for_cpu_transcription(self) -> None:
         class FakeWhisperModel:
@@ -91,13 +111,13 @@ class LowVramModeTests(unittest.TestCase):
                 self.feature_extractor = types.SimpleNamespace(sampling_rate=16000)
 
             def transcribe(self, audio, **kwargs):
-                return iter([types.SimpleNamespace(text="cpu only")]), {"language": "en"}
+                return iter([types.SimpleNamespace(text="cpu only", start=0.0, end=0.5)]), {"language": "en"}
 
         fake_module = types.SimpleNamespace(WhisperModel=FakeWhisperModel)
         with patch.dict(sys.modules, {"faster_whisper": fake_module}):
             with patch("daily_sync_agent.ai.transcribe.load_audio_ffmpeg_mono_f32", return_value=[0.0]):
                 with patch("daily_sync_agent.ai.transcribe._current_process_nvidia_vram_mib") as mock_query:
-                    text = _transcribe_once(
+                    text, diarization = _transcribe_once(
                         Path("/tmp/fake.flac"),
                         model_size="base",
                         device="cpu",
@@ -106,9 +126,10 @@ class LowVramModeTests(unittest.TestCase):
                     )
 
         self.assertEqual(text, "cpu only")
+        self.assertIsNone(diarization)
         mock_query.assert_not_called()
 
-    @patch("daily_sync_agent.ai.transcribe._transcribe_once", return_value="ok")
+    @patch("daily_sync_agent.ai.transcribe._transcribe_once", return_value=("ok", None))
     def test_transcribe_file_logs_success_timing(self, _mock_once) -> None:
         with patch("daily_sync_agent.ai.transcribe.logger.debug") as mock_debug:
             out = transcribe_file(

@@ -15,10 +15,98 @@ from daily_sync_agent.ai.whisper_models import normalize_whisper_device
 logger = logging.getLogger(__name__)
 
 _HALLUCINATION_SILENCE_THRESHOLD_S = 2.0
-_LOW_VRAM_RELEASE_TIMEOUT_S = 15.0
+_LOW_VRAM_RELEASE_TIMEOUT_S = 30.0
 _LOW_VRAM_RELEASE_POLL_S = 0.25
 _LOW_VRAM_VERIFY_MIN_USED_MIB = 512
 _LOW_VRAM_RESIDUAL_TARGET_MIB = 128
+
+
+def _nvidia_compute_app_pids() -> set[int] | None:
+    """Best-effort set of PIDs currently listed by nvidia-smi compute apps query."""
+    try:
+        proc = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, PermissionError) as e:
+        logger.debug("Low-VRAM cleanup: nvidia-smi unavailable for PID query: %s", e)
+        return None
+    except Exception as e:
+        logger.debug("Low-VRAM cleanup: failed to query NVIDIA compute app PIDs: %s", e)
+        return None
+
+    if proc.returncode != 0:
+        return None
+
+    out: set[int] = set()
+    for raw_line in (proc.stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            out.add(int(line.split()[0]))
+        except Exception:
+            continue
+    return out
+
+
+def _descendant_pids(root_pid: int) -> set[int]:
+    """Best-effort recursive PID tree for ``root_pid`` using ``ps``."""
+    try:
+        proc = subprocess.run(
+            ["ps", "-e", "-o", "pid=,ppid="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception as e:
+        logger.debug("Low-VRAM cleanup: failed to inspect process tree: %s", e)
+        return set()
+
+    if proc.returncode != 0:
+        return set()
+
+    by_parent: dict[int, set[int]] = {}
+    for raw_line in (proc.stdout or "").splitlines():
+        parts = raw_line.strip().split()
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except Exception:
+            continue
+        by_parent.setdefault(ppid, set()).add(pid)
+
+    out: set[int] = set()
+    stack = [root_pid]
+    while stack:
+        parent = stack.pop()
+        children = by_parent.get(parent, set())
+        for child in children:
+            if child in out:
+                continue
+            out.add(child)
+            stack.append(child)
+    return out
+
+
+def _tracked_gpu_process_pids(root_pid: int) -> set[int] | None:
+    """Intersection of NVIDIA compute PIDs with this process subtree (root + descendants)."""
+    gpu_pids = _nvidia_compute_app_pids()
+    if gpu_pids is None:
+        return None
+    tracked = {root_pid}
+    tracked.update(_descendant_pids(root_pid))
+    return gpu_pids.intersection(tracked)
 
 
 def _current_process_nvidia_vram_mib(*, pid: int | None = None) -> int | None:
@@ -91,6 +179,9 @@ def _wait_for_whisper_vram_release(
         return True
 
     target_mib = min(_LOW_VRAM_RESIDUAL_TARGET_MIB, max(32, before_release_vram_mib // 4))
+    # If almost all model VRAM is released and no child GPU workers remain, proceed early.
+    relaxed_target_mib = min(512, max(target_mib, max(160, before_release_vram_mib // 8)))
+    root_pid = os.getpid()
     deadline = time.monotonic() + max(0.0, timeout_s)
     while True:
         current_mib = _current_process_nvidia_vram_mib()
@@ -104,6 +195,18 @@ def _wait_for_whisper_vram_release(
                 current_mib,
             )
             return True
+
+        tracked_gpu_pids = _tracked_gpu_process_pids(root_pid)
+        child_gpu_pids = {p for p in (tracked_gpu_pids or set()) if p != root_pid}
+        released_ratio = 1.0 - (float(current_mib) / float(before_release_vram_mib))
+        if tracked_gpu_pids is not None and not child_gpu_pids and current_mib <= relaxed_target_mib and released_ratio >= 0.85:
+            logger.debug(
+                "Low-VRAM cleanup: transcription/diarization GPU workers are gone and VRAM dropped from %s MiB to %s MiB; continuing",
+                before_release_vram_mib,
+                current_mib,
+            )
+            return True
+
         if time.monotonic() >= deadline:
             logger.warning(
                 "Low-VRAM cleanup: current PID still uses about %s MiB of NVIDIA VRAM after waiting %.1fs for Whisper to unload",
@@ -112,6 +215,35 @@ def _wait_for_whisper_vram_release(
             )
             return False
         time.sleep(max(0.01, poll_interval_s))
+
+
+def _best_effort_torch_cuda_release() -> None:
+    """Release PyTorch CUDA allocator/cache when available (best-effort)."""
+    try:
+        import torch
+    except Exception as e:
+        logger.debug("Low-VRAM cleanup: torch import skipped during CUDA cache cleanup: %s", e)
+        return
+
+    try:
+        if not torch.cuda.is_available():
+            return
+    except Exception as e:
+        logger.debug("Low-VRAM cleanup: torch.cuda availability check failed: %s", e)
+        return
+
+    for action_name, action in (
+        ("synchronize", getattr(torch.cuda, "synchronize", None)),
+        ("empty_cache", getattr(torch.cuda, "empty_cache", None)),
+        ("ipc_collect", getattr(torch.cuda, "ipc_collect", None)),
+    ):
+        if not callable(action):
+            continue
+        try:
+            action()
+            logger.debug("Low-VRAM cleanup: torch.cuda.%s executed", action_name)
+        except Exception as e:
+            logger.debug("Low-VRAM cleanup: torch.cuda.%s failed: %s", action_name, e)
 
 
 def _transcribe_kwargs() -> dict[str, object]:
@@ -291,6 +423,7 @@ def _transcribe_once(
             model = None
             gc.collect()
             if device in ("auto", "cuda"):
+                _best_effort_torch_cuda_release()
                 _wait_for_whisper_vram_release(before_release_vram_mib)
         elapsed_s = time.monotonic() - started_at
         logger.debug(

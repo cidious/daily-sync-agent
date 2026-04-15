@@ -134,6 +134,89 @@ def _http_error_detail(resp: httpx.Response) -> str:
         return "(could not read body)"
 
 
+def _looks_like_ollama_cuda_oom(status_code: int, detail: str) -> bool:
+    if status_code < 500:
+        return False
+    d = (detail or "").lower()
+    needles = (
+        "cudamalloc failed",
+        "cuda out of memory",
+        "out of memory",
+        "failed to allocate cuda",
+        "llama runner process has terminated",
+    )
+    return any(n in d for n in needles)
+
+
+def _nvidia_free_vram_mib() -> int | None:
+    """Best-effort sum of free MiB across visible NVIDIA GPUs."""
+    try:
+        proc = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.free",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, PermissionError) as e:
+        logger.debug("Low-VRAM summary tuning: nvidia-smi unavailable: %s", e)
+        return None
+    except Exception as e:
+        logger.debug("Low-VRAM summary tuning: nvidia-smi query failed: %s", e)
+        return None
+    if proc.returncode != 0:
+        return None
+
+    total = 0
+    saw = False
+    for raw_line in (proc.stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            total += max(0, int(line.split()[0]))
+            saw = True
+        except Exception:
+            continue
+    return total if saw else None
+
+
+def _adaptive_ollama_retry_plan_for_vram() -> list[dict[str, int]]:
+    """Retry plan for Ollama CUDA OOM: reduce GPU offload first, then fall back to CPU."""
+    free_mib = _nvidia_free_vram_mib()
+    if free_mib is None:
+        logger.debug("Low-VRAM summary tuning: free VRAM unknown; retry plan=[CPU]")
+        return [{"num_gpu": 0}]
+    if free_mib < 2048:
+        logger.warning("Low-VRAM summary tuning: only about %d MiB free; retry plan=[CPU]", free_mib)
+        return [{"num_gpu": 0}]
+    if free_mib < 4096:
+        logger.warning(
+            "Low-VRAM summary tuning: only about %d MiB free; retry plan=[minimal GPU offload, CPU]",
+            free_mib,
+        )
+        return [{"num_gpu": 1}, {"num_gpu": 0}]
+    logger.debug(
+        "Low-VRAM summary tuning: about %d MiB free; retry plan=[reduced GPU offload, minimal GPU offload, CPU]",
+        free_mib,
+    )
+    return [{"num_gpu": 2}, {"num_gpu": 1}, {"num_gpu": 0}]
+
+
+def _merge_ollama_options(payload: dict, extra_options: dict[str, int]) -> dict:
+    if not extra_options:
+        return payload
+    out = dict(payload)
+    opts = dict(out.get("options") or {})
+    opts.update(extra_options)
+    out["options"] = opts
+    return out
+
+
 def _ollama_model_names(tags_json: dict) -> list[str]:
     return [m["name"] for m in tags_json.get("models", []) if m.get("name")]
 
@@ -254,30 +337,43 @@ def summarize_text(
         resolved_model or "<none>",
     )
 
-    with httpx.Client(timeout=client_timeout) as client:
+    def _build_attempts(*, ollama_extra_options: dict[str, int] | None = None) -> list[tuple[str, str, dict, object]]:
+        extra = ollama_extra_options or {}
         ollama_chat = (
             "Ollama /api/chat",
             f"{base}/api/chat",
-            _with_ollama_keepalive({
-                "model": resolved_model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user_block},
-                ],
-                "stream": False,
-                "options": {"num_predict": token_out, "temperature": 0.3},
-            }, unload_model_after_task=unload_model_after_task),
+            _with_ollama_keepalive(
+                _merge_ollama_options(
+                    {
+                        "model": resolved_model,
+                        "messages": [
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": user_block},
+                        ],
+                        "stream": False,
+                        "options": {"num_predict": token_out, "temperature": 0.3},
+                    },
+                    extra,
+                ),
+                unload_model_after_task=unload_model_after_task,
+            ),
             _parse_ollama_chat,
         )
         ollama_generate = (
             "Ollama /api/generate",
             f"{base}/api/generate",
-            _with_ollama_keepalive({
-                "model": resolved_model,
-                "prompt": full_prompt,
-                "stream": False,
-                "options": {"temperature": 0.3, "num_predict": token_out},
-            }, unload_model_after_task=unload_model_after_task),
+            _with_ollama_keepalive(
+                _merge_ollama_options(
+                    {
+                        "model": resolved_model,
+                        "prompt": full_prompt,
+                        "stream": False,
+                        "options": {"temperature": 0.3, "num_predict": token_out},
+                    },
+                    extra,
+                ),
+                unload_model_after_task=unload_model_after_task,
+            ),
             lambda d: (d.get("response") or "").strip() if isinstance(d, dict) else "",
         )
         openai_chat = (
@@ -319,71 +415,94 @@ def summarize_text(
         )
         # When the server is Ollama, other routes hit the same process — avoid 5× identical long timeouts.
         if looks_like_ollama:
-            attempts: list[tuple[str, str, dict, object]] = [ollama_chat, ollama_generate]
-        else:
-            attempts = [ollama_chat, openai_chat, ollama_generate, openai_completion, llama_cpp]
+            return [ollama_chat, ollama_generate]
+        return [ollama_chat, openai_chat, ollama_generate, openai_completion, llama_cpp]
+
+    with httpx.Client(timeout=client_timeout) as client:
+        attempts = _build_attempts()
 
         failures: list[str] = []
 
-        for name, url, payload, parser in attempts:
-            attempt_started_at = time.monotonic()
-            try:
-                r = client.post(url, json=payload)
-            except httpx.RequestError as e:
-                failures.append(f"{name} ({url}): request error: {e}")
-                logger.info("%s failed: %s", name, e)
-                logger.debug("Summary attempt failed name=%s elapsed_s=%.3f", name, time.monotonic() - attempt_started_at)
-                continue
+        pending_low_vram_retry_options: list[dict[str, int]] = []
 
-            if r.status_code == 200:
+        while True:
+            for name, url, payload, parser in attempts:
+                attempt_started_at = time.monotonic()
                 try:
-                    data = r.json()
-                except Exception as e:
-                    failures.append(f"{name}: invalid JSON: {e} body={_http_error_detail(r)}")
+                    r = client.post(url, json=payload)
+                except httpx.RequestError as e:
+                    failures.append(f"{name} ({url}): request error: {e}")
+                    logger.info("%s failed: %s", name, e)
+                    logger.debug("Summary attempt failed name=%s elapsed_s=%.3f", name, time.monotonic() - attempt_started_at)
                     continue
-                if not isinstance(data, dict):
-                    failures.append(f"{name}: expected JSON object, got {type(data)}")
-                    continue
-                out = parser(data)
-                if isinstance(out, str) and out.strip():
-                    elapsed_total_s = time.monotonic() - started_at
-                    elapsed_attempt_s = time.monotonic() - attempt_started_at
-                    logger.debug(
-                        "Summary generation finished endpoint=%s model=%s mode=%s attempt_s=%.3f total_s=%.3f chars=%d",
+
+                if r.status_code == 200:
+                    try:
+                        data = r.json()
+                    except Exception as e:
+                        failures.append(f"{name}: invalid JSON: {e} body={_http_error_detail(r)}")
+                        continue
+                    if not isinstance(data, dict):
+                        failures.append(f"{name}: expected JSON object, got {type(data)}")
+                        continue
+                    out = parser(data)
+                    if isinstance(out, str) and out.strip():
+                        elapsed_total_s = time.monotonic() - started_at
+                        elapsed_attempt_s = time.monotonic() - attempt_started_at
+                        logger.debug(
+                            "Summary generation finished endpoint=%s model=%s mode=%s attempt_s=%.3f total_s=%.3f chars=%d",
+                            name,
+                            resolved_model or "<none>",
+                            mode,
+                            elapsed_attempt_s,
+                            elapsed_total_s,
+                            len(out.strip()),
+                        )
+                        return out.strip()
+                    logger.warning(
+                        "%s returned HTTP 200 but no extractable assistant text (keys=%s). Trying next endpoint.",
                         name,
-                        resolved_model or "<none>",
-                        mode,
-                        elapsed_attempt_s,
-                        elapsed_total_s,
-                        len(out.strip()),
+                        list(data.keys())[:12],
                     )
-                    return out.strip()
-                logger.warning(
-                    "%s returned HTTP 200 but no extractable assistant text (keys=%s). Trying next endpoint.",
-                    name,
-                    list(data.keys())[:12],
-                )
-                failures.append(
-                    f"{name}: 200 OK but empty content (model may use a different JSON shape; see debug log)"
-                )
-                logger.debug("Summary attempt empty-content name=%s elapsed_s=%.3f", name, time.monotonic() - attempt_started_at)
-                continue
+                    failures.append(
+                        f"{name}: 200 OK but empty content (model may use a different JSON shape; see debug log)"
+                    )
+                    logger.debug("Summary attempt empty-content name=%s elapsed_s=%.3f", name, time.monotonic() - attempt_started_at)
+                    continue
 
-            if r.status_code == 404:
                 detail = _http_error_detail(r)
-                if "not found" in detail.lower() and "model" in detail.lower():
-                    raise RuntimeError(
-                        f"Ollama rejected the model (404): {detail}. "
-                        "Set Preferences → Ollama chat model to a name from `ollama list`, or leave it empty."
-                    )
-                failures.append(f"{name} ({url}): 404 {detail}")
-                logger.info("%s returned 404; trying next endpoint", name)
-                logger.debug("Summary attempt 404 name=%s elapsed_s=%.3f", name, time.monotonic() - attempt_started_at)
-                continue
+                if r.status_code == 404:
+                    if "not found" in detail.lower() and "model" in detail.lower():
+                        raise RuntimeError(
+                            f"Ollama rejected the model (404): {detail}. "
+                            "Set Preferences → Ollama chat model to a name from `ollama list`, or leave it empty."
+                        )
+                    failures.append(f"{name} ({url}): 404 {detail}")
+                    logger.info("%s returned 404; trying next endpoint", name)
+                    logger.debug("Summary attempt 404 name=%s elapsed_s=%.3f", name, time.monotonic() - attempt_started_at)
+                    continue
 
-            raise RuntimeError(
-                f"{name} ({url}): HTTP {r.status_code} {_http_error_detail(r)}"
-            )
+                is_ollama_endpoint = "/api/chat" in url or "/api/generate" in url
+                can_retry_low_vram = unload_model_after_task and is_ollama_endpoint
+                if can_retry_low_vram and _looks_like_ollama_cuda_oom(r.status_code, detail):
+                    if not pending_low_vram_retry_options:
+                        pending_low_vram_retry_options = _adaptive_ollama_retry_plan_for_vram()
+                    if not pending_low_vram_retry_options:
+                        raise RuntimeError(f"{name} ({url}): HTTP {r.status_code} {detail}")
+                    tuned_options = pending_low_vram_retry_options.pop(0)
+                    logger.warning(
+                        "Low-VRAM summary handoff: %s returned CUDA/OOM server error; retrying with Ollama options=%s",
+                        name,
+                        tuned_options,
+                    )
+                    unload_ollama_models(base, preferred_model=resolved_model or model, stop_cli=False)
+                    time.sleep(2.0)
+                    attempts = _build_attempts(ollama_extra_options=tuned_options)
+                    break
+
+                raise RuntimeError(f"{name} ({url}): HTTP {r.status_code} {detail}")
+            else:
+                break
 
         if failures:
             logger.debug(
