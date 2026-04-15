@@ -11,3 +11,4 @@ build/
 # Local test outputs (e.g. daily-sync-agent process in repo root)
 /transcript.txt
 /summary.txt
+/Modelfile.daily-sync-summarizer

@@ -36,7 +36,7 @@ from daily_sync_agent.audio.devices import AudioDevices, AudioMode, list_devices
 from daily_sync_agent.capture.desktop_clip import clip_window_info_to_visible_desktop
 from daily_sync_agent.capture.ffmpeg import FfmpegPaths, RecordingProcess, build_ffmpeg_command, start_recording
 from daily_sync_agent.capture.window_x11 import WindowInfo, pick_window_x11
-from daily_sync_agent.icons import icon_idle, icon_recording
+from daily_sync_agent.icons import icon_idle, icon_processing, icon_recording
 from daily_sync_agent.settings import AppConfig, log_dir, output_dir
 from daily_sync_agent.ui.coordinate_map import build_screen_coordinate_maps, map_native_rect_to_logical
 from daily_sync_agent.ui.window_frame_overlay import WindowFrameOverlay
@@ -632,6 +632,7 @@ class TrayApplication(QWidget):
             QSystemTrayIcon.MessageIcon.Information,
             5000,
         )
+        self._tray.setIcon(icon_processing())
         self._ai_thread = AiThread(self, audio_path, session, self._config)
         self._ai_thread.finished_ok.connect(self._on_ai_ok)
         self._ai_thread.failed.connect(self._on_ai_fail)
@@ -648,6 +649,7 @@ class TrayApplication(QWidget):
             did_summarize = bool(summarized_obj)
         else:
             sd = raw if isinstance(raw, Path) else Path(raw)
+        self._tray.setIcon(icon_idle())
         self._tray.showMessage(
             "Done",
             f"Saved transcript and summary in {sd}" if did_summarize else f"Saved transcript in {sd} (summary disabled)",
@@ -659,6 +661,7 @@ class TrayApplication(QWidget):
 
     def _on_ai_fail(self, err: str) -> None:
         self._ai_thread = None
+        self._tray.setIcon(icon_idle())
         QMessageBox.critical(None, "AI pipeline failed", err[:4000])
         self._rebuild_menu()
         self._try_start_ai_worker()
