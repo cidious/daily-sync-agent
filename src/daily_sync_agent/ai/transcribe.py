@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import time
+from typing import Callable
 
 from daily_sync_agent.ai.audio_decode import load_audio_ffmpeg_mono_f32
 from daily_sync_agent.ai.whisper_models import normalize_whisper_device
@@ -307,6 +308,7 @@ def _transcribe_once(
     identify_speakers: bool = False,
     speaker_profiles_path: Path | None = None,
     speaker_names_path: Path | None = None,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> tuple[str, list[dict] | None]:
     """Return (transcript_text, diarization_segments_or_none)."""
     from faster_whisper import WhisperModel
@@ -330,6 +332,8 @@ def _transcribe_once(
         )
         model = WhisperModel(model_size, device=device, compute_type=compute_type)
         sr = model.feature_extractor.sampling_rate
+        if progress_callback:
+            progress_callback(f"Transcribing audio ({model_size} on {device})…")
         # Decode with ffmpeg + numpy so we never hit faster-whisper's PyAV path (can crash with
         # UnicodeDecodeError in av.error on some locales when resampling FLAC/etc.).
         audio = load_audio_ffmpeg_mono_f32(audio_path, sample_rate=sr)
@@ -360,6 +364,8 @@ def _transcribe_once(
         # Optional diarization: extract speaker information
         if diarize and hf_token:
             try:
+                if progress_callback:
+                    progress_callback("Running speaker diarization…")
                 from daily_sync_agent.ai.diarize import diarize_speakers, merge_diarization_with_transcript
                 dia_result = diarize_speakers(audio_path, hf_token, device=device)
                 diarization_result = dia_result.get("speakers")
@@ -447,6 +453,7 @@ def transcribe_file(
     identify_speakers: bool = False,
     speaker_profiles_path: Path | None = None,
     speaker_names_path: Path | None = None,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> str:
     dev = normalize_whisper_device(device)
     started_at = time.monotonic()
@@ -460,6 +467,8 @@ def transcribe_file(
         unload_model_after_task,
         diarize,
     )
+    if progress_callback:
+        progress_callback(f"Loading Whisper model '{model_size}'…")
     try:
         text, _ = _transcribe_once(
             audio_path,
@@ -472,6 +481,7 @@ def transcribe_file(
             identify_speakers=identify_speakers,
             speaker_profiles_path=speaker_profiles_path,
             speaker_names_path=speaker_names_path,
+            progress_callback=progress_callback,
         )
         logger.debug(
             "Whisper transcribe_file success model=%s device=%s compute_type=%s total_s=%.3f chars=%d",
@@ -494,6 +504,8 @@ def transcribe_file(
             e,
             cpu_ct,
         )
+        if progress_callback:
+            progress_callback(f"GPU issue — retrying on CPU (model '{model_size}')…")
         text, _ = _transcribe_once(
             audio_path,
             model_size=model_size,
@@ -505,6 +517,7 @@ def transcribe_file(
             identify_speakers=identify_speakers,
             speaker_profiles_path=speaker_profiles_path,
             speaker_names_path=speaker_names_path,
+            progress_callback=progress_callback,
         )
         logger.debug(
             "Whisper transcribe_file success after CPU fallback model=%s fallback_compute_type=%s total_s=%.3f chars=%d",

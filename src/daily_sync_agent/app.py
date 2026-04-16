@@ -5,6 +5,8 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import os
+import shutil
+import threading
 import traceback
 from pathlib import Path
 
@@ -157,17 +159,34 @@ class AiThread(QThread):
 
     finished_ok = Signal(object)
     failed = Signal(str)
+    progress = Signal(str)  # P1: stage progress messages
 
     def __init__(self, parent: QWidget, audio_path: Path, session_dir: Path, config: AppConfig) -> None:
         super().__init__(parent)
         self._audio_path = audio_path
         self._session_dir = session_dir
         self._config = config
+        self._cancel_flag = threading.Event()
+
+    def request_cancel(self) -> None:
+        """Request cooperative cancellation (takes effect between transcription and summarization)."""
+        self._cancel_flag.set()
+        logger.info("AI pipeline cancellation requested for session=%s", self._session_dir)
 
     def run(self) -> None:
+        def _on_progress(msg: str) -> None:
+            self.progress.emit(msg)
+            logger.debug("AI pipeline progress: %s", msg)
+
         try:
             logger.debug("AI pipeline start audio=%s session=%s", self._audio_path, self._session_dir)
-            t, s = run_transcribe_and_summarize(self._audio_path, self._session_dir, self._config)
+            t, s = run_transcribe_and_summarize(
+                self._audio_path,
+                self._session_dir,
+                self._config,
+                progress_callback=_on_progress,
+                cancel_check=self._cancel_flag.is_set,
+            )
             logger.debug("AI pipeline done transcript=%s summary=%s", t, s)
             self.finished_ok.emit((self._session_dir, s is not None))
         except Exception:
@@ -212,6 +231,9 @@ class TrayApplication(QWidget):
         self._tray.activated.connect(self._on_activated)
         self._rebuild_menu()
 
+        # P1: re-enqueue sessions that were interrupted mid-AI (crash resume)
+        self._resume_interrupted_sessions()
+
     def wait_for_ai_thread(self, timeout_ms: int = 120_000) -> None:
         """Block until the AI worker and queued jobs finish (e.g. on application exit)."""
         import time
@@ -250,6 +272,40 @@ class TrayApplication(QWidget):
         else:
             logger.debug("Application shutdown cleanup: skipping Ollama unload because AI processing is disabled")
         logger.debug("Application shutdown cleanup finished")
+
+    def _resume_interrupted_sessions(self) -> None:
+        """Re-enqueue sessions whose .processing sentinel was left by a previous crash."""
+        if not self._config.transcribe_speech:
+            return
+        try:
+            base = output_dir()
+        except Exception:
+            return
+        found = 0
+        for sentinel in sorted(base.glob("*/.processing")):
+            session = sentinel.parent
+            audio_path = session / "recording.flac"
+            transcript = session / "transcript.txt"
+            if transcript.is_file():
+                # Already finished; remove stale sentinel
+                try:
+                    sentinel.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                continue
+            if not audio_path.is_file():
+                continue
+            logger.info("Crash resume: found interrupted session %s; re-enqueueing AI pipeline", session)
+            self._ai_queue.append((audio_path, session))
+            found += 1
+        if found:
+            self._tray.showMessage(
+                "Resuming",
+                f"Found {found} interrupted recording(s) — reprocessing now.",
+                QSystemTrayIcon.MessageIcon.Information,
+                7000,
+            )
+            self._try_start_ai_worker()
 
     def show(self) -> None:  # noqa: A003
         self._tray.show()
@@ -411,6 +467,12 @@ class TrayApplication(QWidget):
         act_stop.triggered.connect(self._stop_recording)
         self._menu.addAction(act_stop)
 
+        # P1: cancel AI action (visible only while AI is running)
+        if self._ai_thread is not None and self._ai_thread.isRunning():
+            act_cancel_ai = QAction("Cancel AI processing", self)
+            act_cancel_ai.triggered.connect(self._cancel_ai)
+            self._menu.addAction(act_cancel_ai)
+
         mode_menu = self._menu.addMenu("Audio capture mode")
         mode_group = QActionGroup(self)
         mode_group.setExclusive(True)
@@ -509,6 +571,22 @@ class TrayApplication(QWidget):
     def _start_recording(self) -> None:
         if self._recording is not None or self._selected_window is None:
             return
+
+        # P1: disk space guard
+        try:
+            free_mb = shutil.disk_usage(output_dir()).free // (1024 * 1024)
+            min_mb = getattr(self._config, "min_free_disk_mb", 500)
+            if free_mb < min_mb:
+                QMessageBox.warning(
+                    None,
+                    "Low disk space",
+                    f"Only {free_mb} MB free on recordings disk (minimum {min_mb} MB required). "
+                    "Free up space or lower the threshold in Preferences.",
+                )
+                return
+        except Exception as e:
+            logger.debug("Disk space check failed (non-fatal): %s", e)
+
         win = clip_window_info_to_visible_desktop(self._selected_window)
         if win is None:
             QMessageBox.warning(
@@ -637,6 +715,21 @@ class TrayApplication(QWidget):
                 6000,
             )
 
+        # P1: warn if FLAC is suspiciously small (silent/failed capture)
+        try:
+            flac_kb = audio_path.stat().st_size // 1024
+            logger.debug("Recording FLAC size: %d KB path=%s", flac_kb, audio_path)
+            if flac_kb < 10:
+                logger.warning("FLAC file is very small (%d KB); audio capture may have failed", flac_kb)
+                self._tray.showMessage(
+                    "Recording",
+                    f"Audio file is very small ({flac_kb} KB) — audio capture may have failed silently.",
+                    QSystemTrayIcon.MessageIcon.Warning,
+                    8000,
+                )
+        except OSError:
+            pass
+
         if not self._config.transcribe_speech:
             self._tray.showMessage(
                 "Recording",
@@ -679,15 +772,20 @@ class TrayApplication(QWidget):
             5000,
         )
         self._tray.setIcon(icon_processing())
+        # P1: write .processing sentinel so crash resume detects incomplete sessions
+        try:
+            (session / ".processing").touch()
+        except OSError as e:
+            logger.debug("Could not write .processing sentinel: %s", e)
         self._ai_thread = AiThread(self, audio_path, session, self._config)
         self._ai_thread.finished_ok.connect(self._on_ai_ok)
         self._ai_thread.failed.connect(self._on_ai_fail)
+        # P1: wire progress messages to tray tooltip
+        self._ai_thread.progress.connect(self._on_ai_progress)
         self._ai_thread.start()
         self._rebuild_menu()
 
     def _on_ai_ok(self, session_dir: object) -> None:
-        self._ai_thread = None
-        did_summarize = self._config.summarize_transcript
         raw = session_dir
         if isinstance(raw, tuple) and len(raw) == 2:
             session_obj, summarized_obj = raw
@@ -695,6 +793,13 @@ class TrayApplication(QWidget):
             did_summarize = bool(summarized_obj)
         else:
             sd = raw if isinstance(raw, Path) else Path(raw)
+            did_summarize = self._config.summarize_transcript
+        # P1: remove .processing sentinel
+        try:
+            (sd / ".processing").unlink(missing_ok=True)
+        except OSError:
+            pass
+        self._ai_thread = None
         self._tray.setIcon(icon_idle())
         self._tray.showMessage(
             "Done",
@@ -706,11 +811,32 @@ class TrayApplication(QWidget):
         self._try_start_ai_worker()
 
     def _on_ai_fail(self, err: str) -> None:
+        # P1: remove .processing sentinel (partial transcript was already written by pipeline)
+        if self._ai_thread is not None:
+            try:
+                (self._ai_thread._session_dir / ".processing").unlink(missing_ok=True)
+            except OSError:
+                pass
         self._ai_thread = None
         self._tray.setIcon(icon_idle())
         QMessageBox.critical(None, "AI pipeline failed", err[:4000])
         self._rebuild_menu()
         self._try_start_ai_worker()
+
+    def _on_ai_progress(self, msg: str) -> None:
+        """Update tray tooltip with current AI stage."""
+        self._tray.setToolTip(f"Processing: {msg}")
+
+    def _cancel_ai(self) -> None:
+        """Request cooperative cancellation of the running AI job."""
+        if self._ai_thread is not None and self._ai_thread.isRunning():
+            self._ai_thread.request_cancel()
+            self._tray.showMessage(
+                "Cancelling",
+                "Cancellation requested — will stop after current transcription stage completes.",
+                QSystemTrayIcon.MessageIcon.Information,
+                5000,
+            )
 
     def _open_folder(self) -> None:
         path = output_dir()

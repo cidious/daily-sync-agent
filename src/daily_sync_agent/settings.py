@@ -90,6 +90,10 @@ class AppConfig:
     identify_speakers: bool = False
     ffmpeg_fps: int = 25
     display: str = ":0"
+    # P1 reliability: disk space guard before recording
+    min_free_disk_mb: int = 500
+    # P1 reliability: per-stage AI timeouts (seconds; 0 = no timeout)
+    transcribe_timeout_s: float = 3600.0
     # Preferences dialog geometry (None = use Qt default placement/size)
     prefs_window_x: int | None = None
     prefs_window_y: int | None = None
