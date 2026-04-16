@@ -1,9 +1,49 @@
 """Tests for speaker diarization with Pyannote."""
 
+from __future__ import annotations
+
+import sys
+import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import numpy as _np
+
+
+# ---------------------------------------------------------------------------
+# Minimal torch stub so tests run without the optional torch/cuda packages.
+# The stub must be registered before any test class is instantiated so that
+# @patch("torch.cuda.is_available") can resolve "torch.cuda" from sys.modules.
+# ---------------------------------------------------------------------------
+def _install_fake_torch() -> None:
+    if "torch" in sys.modules:
+        return
+
+    class _FakeTensor:
+        """Thin numpy wrapper exposing the torch.Tensor interface used in diarize.py."""
+
+        def __init__(self, arr) -> None:
+            self._arr = _np.asarray(arr)
+            self.shape = self._arr.shape
+
+        def unsqueeze(self, dim: int) -> "_FakeTensor":
+            return _FakeTensor(_np.expand_dims(self._arr, dim))
+
+    _fake_cuda = types.ModuleType("torch.cuda")
+    _fake_cuda.is_available = lambda: False  # default; individual tests override via @patch
+
+    _fake_torch = types.ModuleType("torch")
+    _fake_torch.cuda = _fake_cuda
+    _fake_torch.from_numpy = _FakeTensor
+    _fake_torch.device = lambda d: d  # return device string as-is
+
+    sys.modules["torch"] = _fake_torch
+    sys.modules["torch.cuda"] = _fake_cuda
+
+
+_install_fake_torch()
 
 from daily_sync_agent.ai.diarize import merge_diarization_with_transcript
 

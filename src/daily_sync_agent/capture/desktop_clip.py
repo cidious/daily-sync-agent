@@ -9,9 +9,28 @@ import subprocess
 from PySide6.QtCore import QRect
 from PySide6.QtGui import QGuiApplication
 
-from daily_sync_agent.capture.window_x11 import WindowInfo
+from daily_sync_agent.capture.window_info import WindowInfo
+from daily_sync_agent.platform import is_linux, is_windows
 
 logger = logging.getLogger(__name__)
+
+
+def _desktop_bounds_from_windows_metrics() -> QRect | None:
+    """Virtual desktop bounds in physical pixels via Win32 metrics."""
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        # https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-getsystemmetrics
+        left = int(user32.GetSystemMetrics(76))
+        top = int(user32.GetSystemMetrics(77))
+        width = int(user32.GetSystemMetrics(78))
+        height = int(user32.GetSystemMetrics(79))
+        if width > 0 and height > 0:
+            return QRect(left, top, width, height)
+    except Exception as e:
+        logger.debug("Win32 virtual desktop bounds unavailable: %s", e)
+    return None
 
 
 def _desktop_bounds_from_xrandr() -> QRect | None:
@@ -78,19 +97,43 @@ def _virtual_desktop_rect_qt_fallback() -> QRect:
 
 def _virtual_desktop_rect() -> QRect:
     """
-    Visible framebuffer in **native X11 pixels** (same as WindowInfo / ffmpeg x11grab).
+    Visible framebuffer in native pixels (same as WindowInfo / ffmpeg x11grab on Linux, gdigrab on Windows).
 
-    Qt ``QScreen.geometry()`` is often in **device-independent** coordinates on scaled X11
-    desktops; intersecting that with xwininfo’s **physical** window rect yields a tiny
-    wrong region. Prefer ``xrandr`` / ``xdpyinfo`` instead.
+    Qt ``QScreen.geometry()`` is often in device-independent coordinates on scaled displays;
+    prefer platform-specific tools (xrandr/xdpyinfo on Linux, mss on Windows) instead.
     """
-    r = _desktop_bounds_from_xrandr()
-    if r is not None and not r.isNull():
-        return r
-    r = _desktop_bounds_from_xdpyinfo()
-    if r is not None and not r.isNull():
-        return r
-    logger.warning("Using Qt screen geometry for desktop clip (xrandr/xdpyinfo unavailable)")
+    if is_linux():
+        r = _desktop_bounds_from_xrandr()
+        if r is not None and not r.isNull():
+            return r
+        r = _desktop_bounds_from_xdpyinfo()
+        if r is not None and not r.isNull():
+            return r
+        logger.warning("Using Qt screen geometry for desktop clip (xrandr/xdpyinfo unavailable)")
+    elif is_windows():
+        # Windows: try mss for physical pixel bounds
+        try:
+            import mss
+            with mss.mss() as sct:
+                united = QRect()
+                for monitor in sct.monitors[1:]:  # Skip monitor 0 (virtual combined)
+                    united = united.united(QRect(
+                        monitor['left'],
+                        monitor['top'],
+                        monitor['width'],
+                        monitor['height']
+                    ))
+                if not united.isNull():
+                    return united
+        except ImportError:
+            logger.debug("mss not available for Windows multi-monitor support")
+        except Exception as e:
+            logger.debug("mss failed to detect monitors: %s", e)
+
+        r = _desktop_bounds_from_windows_metrics()
+        if r is not None and not r.isNull():
+            return r
+
     return _virtual_desktop_rect_qt_fallback()
 
 
@@ -109,6 +152,7 @@ def clip_window_info_to_visible_desktop(info: WindowInfo) -> WindowInfo | None:
     if clipped.isEmpty() or clipped.width() < 1 or clipped.height() < 1:
         return None
     return WindowInfo(
+        title=info.title,
         x=clipped.x(),
         y=clipped.y(),
         width=clipped.width(),

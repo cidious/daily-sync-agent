@@ -1,17 +1,20 @@
 # Daily sync agent
 
-Linux **X11** system-tray tool that records a **selected window** (video) together with **PulseAudio/PipeWire** audio, saves a **video file** (H.264 + AAC in MKV) and a **separate lossless audio file** (FLAC), then runs **local** models: **faster-whisper** for transcription and **Ollama** (or compatible HTTP API) for a summary of the speech.
+Cross-platform system-tray tool for **Linux (X11)** and **Windows** that records a **selected window** (video) together with audio, saves a **video file** (H.264 + AAC in MKV) and a **separate lossless audio file** (FLAC), then runs **local** models: **faster-whisper** for transcription and **Ollama** (or compatible HTTP API) for a summary of the speech.
 
 You can also **process an existing video or audio file** from the command line (`daily-sync-agent process …`); see [CLI: transcribe and summarize a file](#cli-transcribe-and-summarize-a-file).
 
 ## Requirements
 
-- **OS / session**: Linux with **X11** (KDE, GNOME, etc.). Wayland is not supported for window capture in this version. If a Wayland session is detected, `daily-sync-agent` / `daily-sync-agent gui` exits early with a clear message; `daily-sync-agent process <media>` still works.
+- **OS / session**:
+  - **Linux**: X11 session required for GUI recording. Wayland is not supported for window capture in this version; `daily-sync-agent process <media>` still works.
+  - **Windows**: GUI recording is supported with FFmpeg `gdigrab`; system-output capture depends on an available loopback / Stereo Mix-style audio device.
 - **System packages**:
   - `ffmpeg` on `PATH`
-  - `pactl` (typically from **pulseaudio-utils** or your distro’s PipeWire Pulse compatibility tools) to list default sinks/sources and device names
-  - Optional: `xdotool` for window picking (otherwise the app uses an X11 pointer grab)
-  - Optional: `xwininfo` for geometry when using `xdotool`
+  - **Linux**: `pactl` (typically from **pulseaudio-utils** or your distro’s PipeWire Pulse compatibility tools) to list default sinks/sources and device names
+  - **Linux optional**: `xdotool` for window picking (otherwise the app uses an X11 pointer grab)
+  - **Linux optional**: `xwininfo` for geometry when using `xdotool`
+  - **Windows optional**: `mss` for more accurate multi-monitor desktop geometry
 - **Python**: 3.11+
 - **Local AI**:
   - **Transcribe speech (Preferences checkbox)** — master AI toggle. When off, recording still saves media files but transcription/summarization are skipped. The app disables all AI controls (Whisper settings, summarization, and low-VRAM mode).

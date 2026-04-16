@@ -1,4 +1,4 @@
-"""PulseAudio / PipeWire device discovery via pactl."""
+"""Cross-platform audio device discovery and ffmpeg input resolution."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ import re
 import subprocess
 from dataclasses import dataclass
 from enum import Enum
+
+from daily_sync_agent.platform import is_windows
 
 
 class AudioMode(str, Enum):
@@ -79,6 +81,10 @@ def list_sources() -> list[tuple[str, str]]:
 
 
 def list_devices() -> AudioDevices:
+    if is_windows():
+        from daily_sync_agent.audio.devices_windows import list_windows_devices
+
+        return list_windows_devices()
     return AudioDevices(
         default_sink=get_default_sink(),
         default_source=get_default_source(),
@@ -125,6 +131,30 @@ def resolve_pulse_input(
     # MIX: monitor + mic (ffmpeg: input 0 = x11grab, 1 = monitor, 2 = mic — filter built in capture/ffmpeg.py)
     mon = sink_monitor_name(sink)
     return (["-f", "pulse", "-i", mon, "-f", "pulse", "-i", src], [])
+
+
+def resolve_audio_input(
+    mode: AudioMode,
+    *,
+    playback_sink: str | None,
+    recording_source: str | None,
+    devices: AudioDevices,
+) -> tuple[list[str], list[str]]:
+    if is_windows():
+        from daily_sync_agent.audio.devices_windows import resolve_windows_input
+
+        return resolve_windows_input(
+            mode,
+            playback_sink=playback_sink,
+            recording_source=recording_source,
+            devices=devices,
+        )
+    return resolve_pulse_input(
+        mode,
+        playback_sink=playback_sink,
+        recording_source=recording_source,
+        devices=devices,
+    )
 
 
 def wpctl_fallback_defaults() -> tuple[str | None, str | None]:

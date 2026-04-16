@@ -33,10 +33,13 @@ from daily_sync_agent.ai.summarize import list_ollama_models, unload_ollama_mode
 from daily_sync_agent.ai.whisper_compute import compute_type_choices, pick_compute_index_for_value
 from daily_sync_agent.ai.whisper_models import list_whisper_models_for_combo, normalize_whisper_device
 from daily_sync_agent.audio.devices import AudioDevices, AudioMode, list_devices
+from daily_sync_agent.audio.devices_windows import pick_windows_audio_mode, windows_audio_mode_available
 from daily_sync_agent.capture.desktop_clip import clip_window_info_to_visible_desktop
 from daily_sync_agent.capture.ffmpeg import FfmpegPaths, RecordingProcess, build_ffmpeg_command, start_recording
-from daily_sync_agent.capture.window_x11 import WindowInfo, pick_window_x11
+from daily_sync_agent.capture.window_info import WindowInfo
+from daily_sync_agent.capture import pick_window_interactive
 from daily_sync_agent.icons import icon_idle, icon_processing, icon_recording
+from daily_sync_agent.platform import is_linux, is_windows
 from daily_sync_agent.settings import AppConfig, log_dir, output_dir
 from daily_sync_agent.ui.coordinate_map import build_screen_coordinate_maps, map_native_rect_to_logical
 from daily_sync_agent.ui.window_frame_overlay import WindowFrameOverlay
@@ -196,6 +199,7 @@ class TrayApplication(QWidget):
         self._playback_override: str | None = None
         self._recording_override: str | None = None
         self._mode = AudioMode.MIX
+        self._normalize_windows_audio_mode()
         self._recording: RecordingProcess | None = None
         self._session_dir: Path | None = None
         self._ai_thread: AiThread | None = None
@@ -256,7 +260,7 @@ class TrayApplication(QWidget):
             logger.warning("Audio device query failed: %s", self._devices_error)
             self._tray.showMessage(
                 "Audio",
-                f"Could not query audio devices (pactl): {self._devices_error}",
+                f"Could not query audio devices: {self._devices_error}",
                 QSystemTrayIcon.MessageIcon.Warning,
                 8000,
             )
@@ -268,8 +272,9 @@ class TrayApplication(QWidget):
         w, h = c.last_capture_w, c.last_capture_h
         if w <= 0 or h <= 0:
             return
-        wid = c.last_capture_window_id if c.last_capture_window_id is not None else 0
+        wid = c.last_capture_window_id or ""
         self._selected_window = WindowInfo(
+            title=(c.last_capture_title or "Saved capture"),
             x=c.last_capture_x,
             y=c.last_capture_y,
             width=w,
@@ -283,6 +288,7 @@ class TrayApplication(QWidget):
         self._config.last_capture_w = info.width
         self._config.last_capture_h = info.height
         self._config.last_capture_window_id = info.window_id
+        self._config.last_capture_title = info.title
         self._config.save()
 
     def _show_saved_frame_preview(self) -> None:
@@ -370,6 +376,15 @@ class TrayApplication(QWidget):
         )
         return pos
 
+    def _normalize_windows_audio_mode(self) -> None:
+        if not is_windows():
+            return
+        try:
+            mode, _ = pick_windows_audio_mode(self._mode, self._devices)
+        except RuntimeError:
+            return
+        self._mode = mode
+
     def _rebuild_menu(self) -> None:
         try:
             self._devices = list_devices()
@@ -377,6 +392,8 @@ class TrayApplication(QWidget):
         except Exception as e:
             self._devices_error = str(e)
             logger.debug("list_devices on menu open: %s", e)
+
+        self._normalize_windows_audio_mode()
 
         self._menu.clear()
 
@@ -405,6 +422,8 @@ class TrayApplication(QWidget):
             a = QAction(label, self)
             a.setCheckable(True)
             a.setChecked(self._mode == mode)
+            if is_windows():
+                a.setEnabled(windows_audio_mode_available(mode, self._devices))
             mode_group.addAction(a)
             a.triggered.connect(lambda checked=False, m=mode: self._set_mode(m))
             mode_menu.addAction(a)
@@ -469,9 +488,15 @@ class TrayApplication(QWidget):
         self._rebuild_menu()
 
     def _select_window(self) -> None:
-        self._tray.showMessage("Window", "Click a window to record (crosshair or xdotool).", QSystemTrayIcon.MessageIcon.Information, 4000)
+        platform_hint = "crosshair or xdotool" if is_linux() else "select from the list"
+        self._tray.showMessage("Window", f"Choose a window to record ({platform_hint}).", QSystemTrayIcon.MessageIcon.Information, 4000)
         QApplication.processEvents()
-        info = pick_window_x11()
+        try:
+            info = pick_window_interactive()
+        except Exception as e:
+            logger.exception("Window selection failed")
+            QMessageBox.warning(None, "Window selection", str(e))
+            return
         if info:
             self._selected_window = info
             self._persist_last_capture(info)
@@ -516,6 +541,27 @@ class TrayApplication(QWidget):
                 self._selected_window.x,
                 self._selected_window.y,
             )
+        if is_windows():
+            try:
+                effective_mode, reason = pick_windows_audio_mode(self._mode, self._devices)
+            except RuntimeError as e:
+                QMessageBox.warning(None, "Audio capture", str(e))
+                return
+            if effective_mode != self._mode:
+                logger.info(
+                    "Adjusted Windows audio mode from %s to %s based on detected devices",
+                    self._mode.value,
+                    effective_mode.value,
+                )
+                self._mode = effective_mode
+                self._rebuild_menu()
+                if reason:
+                    self._tray.showMessage(
+                        "Audio capture",
+                        reason,
+                        QSystemTrayIcon.MessageIcon.Information,
+                        7000,
+                    )
         try:
             cmd = build_ffmpeg_command(
                 win,
