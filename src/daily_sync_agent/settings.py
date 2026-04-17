@@ -107,6 +107,49 @@ class AppConfig:
     last_capture_window_id: str | None = None
     last_capture_title: str = ""
 
+    def normalized(self) -> AppConfig:
+        """Return a config copy with AI preference dependencies applied consistently."""
+        cur = asdict(self)
+
+        def _as_bool(value: object, default: bool) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                v = value.strip().lower()
+                if v in ("1", "true", "yes", "on"):
+                    return True
+                if v in ("0", "false", "no", "off"):
+                    return False
+            return default
+
+        cur["transcribe_speech"] = _as_bool(cur.get("transcribe_speech"), True)
+        cur["summarize_transcript"] = _as_bool(cur.get("summarize_transcript"), True)
+        cur["unload_models_after_task"] = _as_bool(cur.get("unload_models_after_task"), False)
+        cur["diarize_speakers"] = _as_bool(cur.get("diarize_speakers"), False)
+        cur["identify_speakers"] = _as_bool(cur.get("identify_speakers"), False)
+
+        sm = str(cur.get("summary_mode") or "general").strip().lower()
+        if sm not in ("general", "daily_scrum"):
+            sm = "general"
+        cur["summary_mode"] = sm
+
+        cur["huggingface_token"] = str(cur.get("huggingface_token") or "").strip()
+
+        # Master AI toggle semantics.
+        if not cur["transcribe_speech"]:
+            cur["summarize_transcript"] = False
+            cur["unload_models_after_task"] = False
+            cur["diarize_speakers"] = False
+            cur["identify_speakers"] = False
+
+        # Diarization requires a token; identify requires diarization + token.
+        if not cur["huggingface_token"]:
+            cur["diarize_speakers"] = False
+        if not cur["diarize_speakers"]:
+            cur["identify_speakers"] = False
+
+        return AppConfig(**cur)
+
     @staticmethod
     def config_path() -> Path:
         return _get_config_dir() / "config.json"
@@ -127,11 +170,11 @@ class AppConfig:
             wid = cur.get("last_capture_window_id")
             if wid is not None:
                 cur["last_capture_window_id"] = str(wid)
-            return cls(**cur)
+            return cls(**cur).normalized()
         except Exception:
             return cls()
 
     def save(self) -> None:
         path = self.config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(asdict(self), indent=2))
+        path.write_text(json.dumps(asdict(self.normalized()), indent=2))

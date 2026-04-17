@@ -22,6 +22,14 @@ You can also **process an existing video or audio file** from the command line (
   - **faster-whisper** — choose model size, device (auto / CPU / GPU), and compute type in Preferences. If GPU is selected but CUDA libraries are missing, transcription falls back to CPU automatically.
   - **Low-VRAM mode (Preferences checkbox)** — unload Whisper/Ollama models after each task to free GPU memory. Before summarization starts, the app drops Whisper transcription objects and, when `nvidia-smi` is available, waits for this process’s NVIDIA VRAM usage to fall so Ollama does not start competing with the just-finished Whisper load. On app exit, Ollama model runners are also unloaded/stopped best-effort.
 
+### AI Preferences dependency rules
+
+- `Transcribe speech` is the master AI switch. If off, the app forces `summarize_transcript`, `diarize_speakers`, `identify_speakers`, and `unload_models_after_task` off in saved config.
+- `Speaker diarization` requires a non-empty HuggingFace token. If token is empty, diarization is auto-disabled on save.
+- `Speaker identification` requires diarization + HuggingFace token and is auto-disabled when either dependency is missing.
+- `Summary format` accepts only `general` or `daily_scrum`; invalid values in `config.json` are normalized to `general`.
+- These rules apply consistently in both GUI Preferences and CLI `process` mode through `AppConfig` normalization.
+
 ### Whisper (faster-whisper) models
 
 Model files are **downloaded automatically** the first time you transcribe with a given size (from [Hugging Face](https://huggingface.co/Systran), e.g. `Systran/faster-whisper-base`). No separate installer is required.

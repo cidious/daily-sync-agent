@@ -57,9 +57,11 @@
 ## Project-specific conventions
 - Keep work local-first and resilient: failures often degrade gracefully (e.g., missing audio device list, non-zero ffmpeg exit with existing output, model fallback logic).
 - Settings are user-facing and persisted immediately via `AppConfig.save()`; UI changes in Preferences should round-trip through config fields.
+- AI preference dependencies are centralized in `AppConfig.normalized()` and applied on both `load()` and `save()`; keep GUI/CLI behavior consistent with that single normalization path.
 - Audio mode semantics are strict (`AudioMode.MIX`, `MONITOR`, `MIC`) and determine ffmpeg input indexing/filter graph; update `audio/devices.py` and `capture/ffmpeg.py` together.
 - Debug logging is file-based only when `--debug` is enabled (`log_config.setup_logging`) for both GUI and `process` mode; includes Whisper/summarization stage details + timing, `httpx/httpcore`, and Qt bridge.
 - `transcribe_speech` controls all AI options in Preferences; when off, Whisper/summarization/low-VRAM controls are disabled and summarization is forced off on save.
+- `diarize_speakers` requires a non-empty HuggingFace token; when token is missing, normalization disables diarization and speaker identification.
 - Speaker diarization follows the Whisper device preference (`auto`/`cpu`/`cuda`): `auto` prefers CUDA when available, and explicit CUDA requests degrade to CPU when CUDA is unavailable.
 - Speaker identification depends on diarization and HuggingFace token: keep it opt-in (`identify_speakers` default `False`), and preserve editable `speaker_id: name` text mapping semantics (stored in `speaker_names.txt`).
 - `audio_decode.py` must use ffmpeg (not PyAV) for resampling to avoid platform-specific resampler bugs; always produces mono float32 output at the specified sample rate.

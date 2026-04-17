@@ -154,6 +154,28 @@ def _fill_ollama_model_combo(combo: QComboBox, base_url: str, current_model: str
     combo.setCurrentIndex(idx if idx >= 0 else 0)
 
 
+def _ai_preferences_control_state(
+    *,
+    transcribe_checked: bool,
+    summarize_checked: bool,
+    diarize_checked: bool,
+    hf_token: str,
+) -> dict[str, bool]:
+    """Pure state machine for Preferences AI control enablement."""
+    ai_enabled = transcribe_checked
+    summarize_enabled = ai_enabled and summarize_checked
+    diarize_enabled = ai_enabled
+    hf_token_present = bool((hf_token or "").strip())
+    identify_enabled = diarize_enabled and diarize_checked and hf_token_present
+    return {
+        "ai_enabled": ai_enabled,
+        "summarize_enabled": summarize_enabled,
+        "diarize_enabled": diarize_enabled,
+        "hf_token_enabled": diarize_enabled and diarize_checked,
+        "identify_enabled": identify_enabled,
+    }
+
+
 class AiThread(QThread):
     """Emits the session directory so the tray message matches the job (not the latest recording)."""
 
@@ -936,14 +958,19 @@ class TrayApplication(QWidget):
         e_fps = QLineEdit(str(cfg.ffmpeg_fps))
         chk_transcribe = QCheckBox("Transcribe speech")
         chk_transcribe.setChecked(cfg.transcribe_speech)
+        chk_transcribe.setToolTip("Master AI toggle: when off, all AI options are disabled and processing mode skips AI.")
         chk_summarize = QCheckBox("Summarize the transcripted text")
         chk_summarize.setChecked(cfg.summarize_transcript)
+        chk_summarize.setToolTip("Runs local summarization after transcription.")
         chk_unload_models = QCheckBox("Unload Whisper/Ollama models after each task")
         chk_unload_models.setChecked(cfg.unload_models_after_task)
+        chk_unload_models.setToolTip("Low-VRAM mode: unload models between tasks to reduce peak GPU memory use.")
         chk_diarize = QCheckBox("Enable speaker diarization (Pyannote)")
         chk_diarize.setChecked(cfg.diarize_speakers)
+        chk_diarize.setToolTip("Requires HuggingFace token and accepted Pyannote model license.")
         chk_identify = QCheckBox("Speaker identification")
         chk_identify.setChecked(cfg.identify_speakers)
+        chk_identify.setToolTip("Requires speaker diarization and HuggingFace token.")
         e_hf_token = QLineEdit(cfg.huggingface_token)
         e_hf_token.setEchoMode(QLineEdit.EchoMode.Password)
         e_hf_token.setPlaceholderText("Get token from huggingface.co/settings/tokens (keep private)")
@@ -955,28 +982,33 @@ class TrayApplication(QWidget):
         combo_summary.setCurrentIndex(idx_sm if idx_sm >= 0 else 0)
 
         def sync_ai_controls() -> None:
-            ai_enabled = chk_transcribe.isChecked()
-            summarize_enabled = ai_enabled and chk_summarize.isChecked()
-            diarize_enabled = ai_enabled
-            identify_enabled = diarize_enabled and chk_diarize.isChecked()
+            st = _ai_preferences_control_state(
+                transcribe_checked=chk_transcribe.isChecked(),
+                summarize_checked=chk_summarize.isChecked(),
+                diarize_checked=chk_diarize.isChecked(),
+                hf_token=e_hf_token.text(),
+            )
 
-            combo_whisper.setEnabled(ai_enabled)
-            btn_whisper_refresh.setEnabled(ai_enabled)
-            combo_whisper_dev.setEnabled(ai_enabled)
-            combo_whisper_ct.setEnabled(ai_enabled)
-            chk_summarize.setEnabled(ai_enabled)
-            chk_unload_models.setEnabled(ai_enabled)
-            chk_diarize.setEnabled(diarize_enabled)
-            e_hf_token.setEnabled(diarize_enabled and chk_diarize.isChecked())
-            chk_identify.setEnabled(identify_enabled)
-            e_ollama.setEnabled(summarize_enabled)
-            combo_model.setEnabled(summarize_enabled)
-            btn_refresh_models.setEnabled(summarize_enabled)
-            combo_summary.setEnabled(summarize_enabled)
+            combo_whisper.setEnabled(st["ai_enabled"])
+            btn_whisper_refresh.setEnabled(st["ai_enabled"])
+            combo_whisper_dev.setEnabled(st["ai_enabled"])
+            combo_whisper_ct.setEnabled(st["ai_enabled"])
+            chk_summarize.setEnabled(st["ai_enabled"])
+            chk_unload_models.setEnabled(st["ai_enabled"])
+            chk_diarize.setEnabled(st["diarize_enabled"])
+            e_hf_token.setEnabled(st["hf_token_enabled"])
+            chk_identify.setEnabled(st["identify_enabled"])
+            if not st["identify_enabled"]:
+                chk_identify.setChecked(False)
+            e_ollama.setEnabled(st["summarize_enabled"])
+            combo_model.setEnabled(st["summarize_enabled"])
+            btn_refresh_models.setEnabled(st["summarize_enabled"])
+            combo_summary.setEnabled(st["summarize_enabled"])
 
         chk_transcribe.toggled.connect(lambda _checked: sync_ai_controls())
         chk_summarize.toggled.connect(lambda _checked: sync_ai_controls())
         chk_diarize.toggled.connect(lambda _checked: sync_ai_controls())
+        e_hf_token.textChanged.connect(lambda _txt: sync_ai_controls())
         sync_ai_controls()
 
         lay.addRow("Video FPS", e_fps)
@@ -1004,13 +1036,11 @@ class TrayApplication(QWidget):
             self._config.ollama_base_url = e_ollama.text().strip() or self._config.ollama_base_url
             md = combo_model.currentData()
             self._config.ollama_model = md.strip() if isinstance(md, str) else ""
-            self._config.summarize_transcript = chk_summarize.isChecked() if self._config.transcribe_speech else False
+            self._config.summarize_transcript = chk_summarize.isChecked()
             smd = combo_summary.currentData()
             self._config.summary_mode = str(smd) if smd else "general"
-            self._config.diarize_speakers = chk_diarize.isChecked() if self._config.transcribe_speech else False
-            self._config.identify_speakers = (
-                chk_identify.isChecked() if (self._config.transcribe_speech and self._config.diarize_speakers) else False
-            )
+            self._config.diarize_speakers = chk_diarize.isChecked()
+            self._config.identify_speakers = chk_identify.isChecked()
             self._config.huggingface_token = e_hf_token.text().strip()
             wm = combo_whisper.currentData()
             self._config.whisper_model = wm.strip() if isinstance(wm, str) and wm.strip() else "base"
@@ -1018,11 +1048,20 @@ class TrayApplication(QWidget):
             self._config.whisper_device = str(wdv) if wdv else "auto"
             wct = combo_whisper_ct.currentData()
             self._config.whisper_compute_type = str(wct) if wct else "default"
-            self._config.unload_models_after_task = chk_unload_models.isChecked() if self._config.transcribe_speech else False
+            self._config.unload_models_after_task = chk_unload_models.isChecked()
             try:
                 self._config.ffmpeg_fps = max(1, int(e_fps.text().strip()))
             except ValueError:
                 pass
+
+            requested_diarize = self._config.diarize_speakers
+            self._config = self._config.normalized()
+            if requested_diarize and not self._config.diarize_speakers:
+                QMessageBox.information(
+                    self,
+                    "Speaker diarization",
+                    "Speaker diarization was turned off because a HuggingFace token is required.",
+                )
             self._config.save()
 
             # If transcription is disabled, queued jobs should not linger.
