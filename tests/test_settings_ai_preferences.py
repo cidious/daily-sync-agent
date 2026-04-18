@@ -65,6 +65,16 @@ class SettingsAIPreferencesTests(unittest.TestCase):
         self.assertFalse(cfg.unload_models_after_task)
         self.assertEqual(cfg.summary_mode, "general")
 
+    def test_normalized_clamps_speaker_id_quality_knobs(self) -> None:
+        cfg = AppConfig(
+            speaker_id_similarity_threshold=9.0,
+            speaker_id_min_ref_segment_s=-3.0,
+            speaker_id_max_ref_segments=99,
+        ).normalized()
+        self.assertEqual(cfg.speaker_id_similarity_threshold, 1.0)
+        self.assertEqual(cfg.speaker_id_min_ref_segment_s, 0.5)
+        self.assertEqual(cfg.speaker_id_max_ref_segments, 8)
+
 
 if __name__ == "__main__":
     unittest.main()

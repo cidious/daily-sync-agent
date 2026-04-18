@@ -66,6 +66,40 @@ class _FakeSummaryClientOomThenRetry:
         return _FakeResponse(200, {"message": {"content": "retry summary"}})
 
 
+class _FakeTags404Client:
+    def __init__(self, timeout=None) -> None:
+        self.timeout = timeout
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    def get(self, url: str) -> _FakeResponse:
+        return _FakeResponse(404, {}, text='{"error":"not found"}')
+
+
+class _FakeSummaryClientFallbackOrder:
+    def __init__(self, timeout=None) -> None:
+        self.timeout = timeout
+        self.calls: list[str] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    def post(self, url: str, json: dict) -> _FakeResponse:
+        self.calls.append(url)
+        if url.endswith("/api/chat"):
+            return _FakeResponse(404, {}, text='{"error":"route not found"}')
+        if url.endswith("/v1/chat/completions"):
+            return _FakeResponse(200, {"choices": [{"message": {"content": "openai summary"}}]})
+        return _FakeResponse(500, {}, text='{"error":"unexpected endpoint"}')
+
+
 class SummarizeLoggingTests(unittest.TestCase):
     @patch("daily_sync_agent.ai.summarize.logger.debug")
     def test_summarize_text_logs_start_and_finish_timing(self, mock_debug) -> None:
@@ -111,6 +145,26 @@ class SummarizeLoggingTests(unittest.TestCase):
         self.assertNotIn("num_gpu", first_payload.get("options", {}))
         self.assertEqual(second_payload.get("options", {}).get("num_gpu"), 0)
         mock_unload.assert_called_once()
+
+    def test_summarize_text_non_ollama_falls_back_to_openai_chat(self) -> None:
+        summary_client = _FakeSummaryClientFallbackOrder()
+        with patch(
+            "daily_sync_agent.ai.summarize.httpx.Client",
+            side_effect=[_FakeTags404Client(), summary_client],
+        ):
+            out = summarize_text(
+                "hello transcript",
+                base_url="http://127.0.0.1:9999",
+                model="some-model",
+                summary_mode="daily_scrum",
+                timeout_s=120.0,
+                unload_model_after_task=False,
+            )
+
+        self.assertEqual(out, "openai summary")
+        self.assertGreaterEqual(len(summary_client.calls), 2)
+        self.assertTrue(summary_client.calls[0].endswith("/api/chat"))
+        self.assertTrue(summary_client.calls[1].endswith("/v1/chat/completions"))
 
 
 if __name__ == "__main__":

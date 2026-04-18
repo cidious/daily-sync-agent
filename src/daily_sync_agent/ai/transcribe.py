@@ -308,6 +308,9 @@ def _transcribe_once(
     identify_speakers: bool = False,
     speaker_profiles_path: Path | None = None,
     speaker_names_path: Path | None = None,
+    speaker_id_similarity_threshold: float = 0.72,
+    speaker_id_min_ref_segment_s: float = 2.0,
+    speaker_id_max_ref_segments: int = 3,
     progress_callback: Callable[[str], None] | None = None,
 ) -> tuple[str, list[dict] | None]:
     """Return (transcript_text, diarization_segments_or_none)."""
@@ -367,7 +370,17 @@ def _transcribe_once(
                 if progress_callback:
                     progress_callback("Running speaker diarization…")
                 from daily_sync_agent.ai.diarize import diarize_speakers, merge_diarization_with_transcript
-                dia_result = diarize_speakers(audio_path, hf_token, device=device)
+                try:
+                    dia_result = diarize_speakers(audio_path, hf_token, device=device)
+                except (RuntimeError, OSError) as e:
+                    if device in ("auto", "cuda") and (_looks_like_cuda_runtime_missing(e) or _looks_like_cuda_oom_or_pressure(e)):
+                        logger.warning(
+                            "Diarization CUDA issue (%s). Retrying diarization on CPU.",
+                            e,
+                        )
+                        dia_result = diarize_speakers(audio_path, hf_token, device="cpu")
+                    else:
+                        raise
                 diarization_result = dia_result.get("speakers")
                 if identify_speakers and diarization_result and speaker_profiles_path and speaker_names_path:
                     try:
@@ -383,6 +396,9 @@ def _transcribe_once(
                             device=device,
                             profiles_path=speaker_profiles_path,
                             names_path=speaker_names_path,
+                            similarity_threshold=speaker_id_similarity_threshold,
+                            min_reference_segment_s=speaker_id_min_ref_segment_s,
+                            max_reference_segments=speaker_id_max_ref_segments,
                         )
                         diarization_result = rename_diarization_speakers(diarization_result, local_to_name)
                     except Exception as e:
@@ -453,6 +469,9 @@ def transcribe_file(
     identify_speakers: bool = False,
     speaker_profiles_path: Path | None = None,
     speaker_names_path: Path | None = None,
+    speaker_id_similarity_threshold: float = 0.72,
+    speaker_id_min_ref_segment_s: float = 2.0,
+    speaker_id_max_ref_segments: int = 3,
     progress_callback: Callable[[str], None] | None = None,
 ) -> str:
     dev = normalize_whisper_device(device)
@@ -481,6 +500,9 @@ def transcribe_file(
             identify_speakers=identify_speakers,
             speaker_profiles_path=speaker_profiles_path,
             speaker_names_path=speaker_names_path,
+            speaker_id_similarity_threshold=speaker_id_similarity_threshold,
+            speaker_id_min_ref_segment_s=speaker_id_min_ref_segment_s,
+            speaker_id_max_ref_segments=speaker_id_max_ref_segments,
             progress_callback=progress_callback,
         )
         logger.debug(
@@ -517,6 +539,9 @@ def transcribe_file(
             identify_speakers=identify_speakers,
             speaker_profiles_path=speaker_profiles_path,
             speaker_names_path=speaker_names_path,
+            speaker_id_similarity_threshold=speaker_id_similarity_threshold,
+            speaker_id_min_ref_segment_s=speaker_id_min_ref_segment_s,
+            speaker_id_max_ref_segments=speaker_id_max_ref_segments,
             progress_callback=progress_callback,
         )
         logger.debug(

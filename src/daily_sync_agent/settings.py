@@ -88,6 +88,10 @@ class AppConfig:
     huggingface_token: str = ""  # HF token for accessing Pyannote models
     # Optional cross-session speaker identification using saved embeddings + editable names.
     identify_speakers: bool = False
+    # P3 speaker-ID quality knobs (used by speaker profiling/matching).
+    speaker_id_similarity_threshold: float = 0.72
+    speaker_id_min_ref_segment_s: float = 2.0
+    speaker_id_max_ref_segments: int = 3
     ffmpeg_fps: int = 25
     display: str = ":0"
     # P1 reliability: disk space guard before recording
@@ -122,11 +126,26 @@ class AppConfig:
                     return False
             return default
 
+        def _as_float(value: object, default: float) -> float:
+            try:
+                return float(value)
+            except Exception:
+                return default
+
+        def _as_int(value: object, default: int) -> int:
+            try:
+                return int(value)
+            except Exception:
+                return default
+
         cur["transcribe_speech"] = _as_bool(cur.get("transcribe_speech"), True)
         cur["summarize_transcript"] = _as_bool(cur.get("summarize_transcript"), True)
         cur["unload_models_after_task"] = _as_bool(cur.get("unload_models_after_task"), False)
         cur["diarize_speakers"] = _as_bool(cur.get("diarize_speakers"), False)
         cur["identify_speakers"] = _as_bool(cur.get("identify_speakers"), False)
+        cur["speaker_id_similarity_threshold"] = _as_float(cur.get("speaker_id_similarity_threshold"), 0.72)
+        cur["speaker_id_min_ref_segment_s"] = _as_float(cur.get("speaker_id_min_ref_segment_s"), 2.0)
+        cur["speaker_id_max_ref_segments"] = _as_int(cur.get("speaker_id_max_ref_segments"), 3)
 
         sm = str(cur.get("summary_mode") or "general").strip().lower()
         if sm not in ("general", "daily_scrum"):
@@ -134,6 +153,11 @@ class AppConfig:
         cur["summary_mode"] = sm
 
         cur["huggingface_token"] = str(cur.get("huggingface_token") or "").strip()
+
+        # Clamp speaker-ID tuning ranges to keep runtime behavior sane.
+        cur["speaker_id_similarity_threshold"] = max(0.0, min(1.0, cur["speaker_id_similarity_threshold"]))
+        cur["speaker_id_min_ref_segment_s"] = max(0.5, min(30.0, cur["speaker_id_min_ref_segment_s"]))
+        cur["speaker_id_max_ref_segments"] = max(1, min(8, cur["speaker_id_max_ref_segments"]))
 
         # Master AI toggle semantics.
         if not cur["transcribe_speech"]:

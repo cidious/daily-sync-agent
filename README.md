@@ -208,7 +208,7 @@ Enable **speaker labels** in transcripts for multi-speaker recordings (meetings,
    - Record normally. Transcripts will include speaker labels: `[Speaker_1] Good morning!` / `[Speaker_2] Hi there!`
    - Audio is automatically converted to **16 kHz mono WAV** for best diarization accuracy (Pyannote is sample-rate sensitive)
    - Diarization uses the same **Whisper device** preference from Preferences (`Auto-detect`, `CPU`, `GPU (CUDA)`). In `Auto-detect`, CUDA is used when available.
-   - With **Speaker identification** enabled, the app picks the longest clean segment per detected speaker, computes embeddings, and matches them against saved speaker profiles.
+    - With **Speaker identification** enabled, the app picks top clean segments per detected speaker (duration-weighted embeddings) and matches them against saved speaker profiles with one-to-one matching per session to reduce speaker-collision errors.
    - Edit `~/.config/daily-sync-agent/speaker_names.txt` to rename profile IDs (for example `speaker_01: Alice`) and future transcripts will use those names.
    - First transcription may take longer on initial model load; subsequent runs are faster
 
@@ -231,7 +231,7 @@ Enable **speaker labels** in transcripts for multi-speaker recordings (meetings,
    - `recording.mkv` — video + audio
    - `recording.flac` — audio only (used for transcription)
    - `transcript.txt` — Whisper output
-   - `summary.txt` — LLM summary when summarization is enabled (format depends on **Preferences → Summary format**: **General** = one short paragraph; **Daily scrum** = structured sections — title, date, topics, solutions, tasks, blockers — in the same language as the transcript)  
+    - `summary.txt` — LLM summary when summarization is enabled (format depends on **Preferences → Summary format**: **General** = one short paragraph; **Daily scrum** = structured sections — title, date, participants, topics, decisions, action items (`task + owner + due/time hint`), owner responsibilities, blockers — in the same language as the transcript)  
    FFmpeg logs: `~/.cache/daily-sync-agent/logs/`.  
    App config: `~/.config/daily-sync-agent/config.json` (window placement, last capture rectangle, Ollama URL/model, **`transcribe_speech`**, **`summarize_transcript`**, **`summary_mode`**, **`ollama_request_timeout_s`**, Whisper options, **`unload_models_after_task`**, etc.).
 

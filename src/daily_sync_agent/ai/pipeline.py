@@ -47,6 +47,9 @@ def run_transcribe_and_summarize(
                     identify_speakers=config.identify_speakers,
                     speaker_profiles_path=speaker_profiles_path(),
                     speaker_names_path=speaker_names_path(),
+                    speaker_id_similarity_threshold=config.speaker_id_similarity_threshold,
+                    speaker_id_min_ref_segment_s=config.speaker_id_min_ref_segment_s,
+                    speaker_id_max_ref_segments=config.speaker_id_max_ref_segments,
                     progress_callback=progress_callback,
                 )
                 try:
@@ -69,6 +72,9 @@ def run_transcribe_and_summarize(
                 identify_speakers=config.identify_speakers,
                 speaker_profiles_path=speaker_profiles_path(),
                 speaker_names_path=speaker_names_path(),
+                speaker_id_similarity_threshold=config.speaker_id_similarity_threshold,
+                speaker_id_min_ref_segment_s=config.speaker_id_min_ref_segment_s,
+                speaker_id_max_ref_segments=config.speaker_id_max_ref_segments,
                 progress_callback=progress_callback,
             )
     except Exception as exc:

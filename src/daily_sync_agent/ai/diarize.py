@@ -233,6 +233,37 @@ def merge_diarization_with_transcript(
     if not diarization_speakers:
         return "\n".join(seg.get("text", "") for seg in transcript_segments if seg.get("text"))
 
+    cleaned: list[dict[str, object]] = []
+    for seg in diarization_speakers:
+        try:
+            start = float(seg.get("start", 0.0))
+            end = float(seg.get("end", 0.0))
+        except Exception:
+            continue
+        if end <= start:
+            continue
+        speaker = str(seg.get("speaker", "")).strip() or "Unknown"
+        cleaned.append({"start": start, "end": end, "speaker": speaker})
+
+    if not cleaned:
+        return "\n".join(seg.get("text", "") for seg in transcript_segments if seg.get("text"))
+
+    cleaned.sort(key=lambda it: (float(it["start"]), float(it["end"])))
+    compact: list[dict[str, object]] = []
+    for seg in cleaned:
+        if not compact:
+            compact.append(seg)
+            continue
+        prev = compact[-1]
+        # Merge adjacent tiny-gapped spans from same speaker to reduce fragmentation noise.
+        if (
+            prev["speaker"] == seg["speaker"]
+            and float(seg["start"]) - float(prev["end"]) <= 0.15
+        ):
+            prev["end"] = max(float(prev["end"]), float(seg["end"]))
+        else:
+            compact.append(seg)
+
     result_lines: list[str] = []
     for seg in transcript_segments:
         text = seg.get("text", "").strip()
@@ -241,16 +272,24 @@ def merge_diarization_with_transcript(
         start = seg.get("start", 0)
         end = seg.get("end", 0)
 
-        # Find speaker for this segment (closest match by time overlap)
+        # Find speaker by maximum overlap across diarization segments.
         matching_speaker = None
-        for dia_seg in diarization_speakers:
-            dia_start = dia_seg.get("start", 0)
-            dia_end = dia_seg.get("end", 0)
-            # Simple overlap heuristic: if segment center is within diarization segment
-            seg_center = (start + end) / 2
-            if dia_start <= seg_center <= dia_end:
-                matching_speaker = dia_seg.get("speaker", "Unknown")
-                break
+        best_overlap = 0.0
+        for dia_seg in compact:
+            dia_start = float(dia_seg.get("start", 0.0))
+            dia_end = float(dia_seg.get("end", 0.0))
+            overlap = min(float(end), dia_end) - max(float(start), dia_start)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                matching_speaker = str(dia_seg.get("speaker", "Unknown"))
+
+        # Fallback for edge boundary cases: use center-hit when no positive overlap.
+        if not matching_speaker:
+            seg_center = (float(start) + float(end)) / 2.0
+            for dia_seg in compact:
+                if float(dia_seg.get("start", 0.0)) <= seg_center <= float(dia_seg.get("end", 0.0)):
+                    matching_speaker = str(dia_seg.get("speaker", "Unknown"))
+                    break
 
         if matching_speaker:
             result_lines.append(f"[{matching_speaker}] {text}")

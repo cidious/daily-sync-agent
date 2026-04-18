@@ -33,7 +33,7 @@
 - `run_transcribe_and_summarize()` writes `transcript.txt` before summary; summary prompt can include session date parsed from folder name (`ai/session_date.py`).
 - `transcribe_speech` is a master AI toggle: when disabled, GUI recording still saves media but skips AI queueing, and `process` mode exits after reporting AI is disabled.
 - When `diarize_speakers` is enabled, Whisper segments are combined with Pyannote speaker detection (16 kHz mono audio via `audio_decode.py`) and speaker labels are merged into transcript (e.g., `[Speaker_1] Text`).
-- When `identify_speakers` is enabled, speaker embeddings are extracted from the longest clean audio segments per speaker and matched against persisted profiles (`speaker_profiles.npz`). Matched profiles are renamed using editable names from `speaker_names.txt`, and new speakers create new profiles with auto-incrementing IDs (`speaker_01`, `speaker_02`, etc.).
+- When `identify_speakers` is enabled, speaker embeddings are extracted from top-K clean segments per speaker (duration-weighted), with conservative fallback to best available segments when overlaps dominate. Matching is one-to-one within a session to avoid collapsing multiple active speakers onto one profile; new speakers create auto-incrementing IDs (`speaker_01`, `speaker_02`, etc.).
 
 ## Integration points / external dependencies
 - **Hard runtime deps (all platforms)**: `ffmpeg`, Python 3.11+, PySide6.
@@ -64,9 +64,11 @@
 - `diarize_speakers` requires a non-empty HuggingFace token; when token is missing, normalization disables diarization and speaker identification.
 - Speaker diarization follows the Whisper device preference (`auto`/`cpu`/`cuda`): `auto` prefers CUDA when available, and explicit CUDA requests degrade to CPU when CUDA is unavailable.
 - Speaker identification depends on diarization and HuggingFace token: keep it opt-in (`identify_speakers` default `False`), and preserve editable `speaker_id: name` text mapping semantics (stored in `speaker_names.txt`).
+- Speaker-ID quality knobs (`speaker_id_similarity_threshold`, `speaker_id_min_ref_segment_s`, `speaker_id_max_ref_segments`) are config-level settings normalized in `AppConfig.normalized()`; keep defaults stable and clamp ranges for backward compatibility.
 - `audio_decode.py` must use ffmpeg (not PyAV) for resampling to avoid platform-specific resampler bugs; always produces mono float32 output at the specified sample rate.
 - Pyannote audio conversion (`ai/diarize.py`) must always produce 16kHz mono WAV via `_audio_to_16k_mono_wav()` (sample-rate sensitivity is critical for accuracy); temporary files are cleaned up after diarization.
 - `run_transcribe_and_summarize()` must keep optional-summary semantics: always write `transcript.txt`, and return/write `summary.txt` only when `summarize_transcript` is enabled.
+- Daily-scrum summarization output is action/owner-centric: preserve sections for decisions, action items (task + owner + due/time hint), owner responsibilities, and blockers; unknown owners/due hints must be explicit rather than invented.
 - `unload_models_after_task` must propagate through both transcription and summarization code paths (including Whisper VRAM-release waiting in `ai/transcribe.py` and Ollama keep-alive behavior).
 - **Platform compatibility**: Use `platform.is_linux()` / `platform.is_windows()` for conditional logic; avoid hard-coded Linux assumptions (e.g., X11 paths, pactl). Use `platformdirs` for config/cache paths instead of XDG env vars directly.
 - **Window capture abstraction**: Wrap platform-specific window picking in `capture/__init__.py` conditional imports; add new platforms by creating `capture/window_<platform>.py` returning standardized `WindowInfo`.

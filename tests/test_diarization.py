@@ -104,6 +104,30 @@ class TestDiarizationMerge(unittest.TestCase):
         self.assertIn("Hello", result)
         self.assertEqual(len([line for line in result.split("\n") if line.strip()]), 1)
 
+    def test_merge_prefers_speaker_with_max_overlap(self) -> None:
+        segments = [
+            {"text": "handoff", "start": 1.0, "end": 2.4},
+        ]
+        diarization = [
+            {"start": 0.9, "end": 1.6, "speaker": "Speaker_1"},
+            {"start": 1.5, "end": 2.5, "speaker": "Speaker_2"},
+        ]
+        # Overlap with Speaker_1 = 0.6s, with Speaker_2 = 0.9s.
+        result = merge_diarization_with_transcript(segments, diarization)
+        self.assertEqual(result, "[Speaker_2] handoff")
+
+    def test_merge_cleans_invalid_and_merges_tiny_same_speaker_gaps(self) -> None:
+        segments = [
+            {"text": "hello", "start": 0.05, "end": 1.95},
+        ]
+        diarization = [
+            {"start": 0.0, "end": 1.0, "speaker": "Speaker_1"},
+            {"start": 1.08, "end": 2.0, "speaker": "Speaker_1"},
+            {"start": 3.0, "end": 2.9, "speaker": "Speaker_2"},  # invalid, ignored
+        ]
+        result = merge_diarization_with_transcript(segments, diarization)
+        self.assertEqual(result, "[Speaker_1] hello")
+
 
 class TestDiarizationDeviceSelection(unittest.TestCase):
     @patch("torch.cuda.is_available", return_value=True)

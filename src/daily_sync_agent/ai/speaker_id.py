@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 _MIN_REFERENCE_SEGMENT_S = 2.0
 _SIMILARITY_THRESHOLD = 0.72
+_MAX_REFERENCE_SEGMENTS = 3
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -41,21 +42,54 @@ def _is_clean_segment(seg: dict, diarization_speakers: list[dict]) -> bool:
     return True
 
 
-def select_longest_clean_segments(diarization_speakers: list[dict]) -> dict[str, tuple[float, float]]:
-    """Pick one longest non-overlapping segment per diarization speaker."""
-    best: dict[str, tuple[float, float]] = {}
+def _segment_duration(seg: dict) -> float:
+    start = float(seg.get("start", 0.0))
+    end = float(seg.get("end", 0.0))
+    return max(0.0, end - start)
+
+
+def select_reference_segments(
+    diarization_speakers: list[dict],
+    *,
+    min_reference_segment_s: float = _MIN_REFERENCE_SEGMENT_S,
+    max_reference_segments: int = _MAX_REFERENCE_SEGMENTS,
+) -> dict[str, list[tuple[float, float]]]:
+    """Pick top-K reference segments per speaker (clean first, fallback to best available)."""
+    by_speaker_clean: dict[str, list[tuple[float, float, float]]] = {}
+    by_speaker_any: dict[str, list[tuple[float, float, float]]] = {}
     for seg in diarization_speakers:
-        if not _is_clean_segment(seg, diarization_speakers):
+        speaker = str(seg.get("speaker", "")).strip()
+        if not speaker:
             continue
         start = float(seg.get("start", 0.0))
         end = float(seg.get("end", 0.0))
-        if end - start < _MIN_REFERENCE_SEGMENT_S:
+        dur = max(0.0, end - start)
+        if dur < max(0.1, float(min_reference_segment_s)):
             continue
-        speaker = str(seg.get("speaker", ""))
-        cur = best.get(speaker)
-        if cur is None or (end - start) > (cur[1] - cur[0]):
-            best[speaker] = (start, end)
-    return best
+        by_speaker_any.setdefault(speaker, []).append((start, end, dur))
+        if _is_clean_segment(seg, diarization_speakers):
+            by_speaker_clean.setdefault(speaker, []).append((start, end, dur))
+
+    k = max(1, int(max_reference_segments))
+    out: dict[str, list[tuple[float, float]]] = {}
+    all_speakers = set(by_speaker_any.keys()) | set(by_speaker_clean.keys())
+    for speaker in all_speakers:
+        candidates = by_speaker_clean.get(speaker) or by_speaker_any.get(speaker, [])
+        if not candidates:
+            continue
+        candidates.sort(key=lambda it: it[2], reverse=True)
+        out[speaker] = [(s, e) for s, e, _d in candidates[:k]]
+    return out
+
+
+def select_longest_clean_segments(diarization_speakers: list[dict]) -> dict[str, tuple[float, float]]:
+    """Backward-compatible helper: one best reference segment per speaker."""
+    refs = select_reference_segments(
+        diarization_speakers,
+        min_reference_segment_s=_MIN_REFERENCE_SEGMENT_S,
+        max_reference_segments=1,
+    )
+    return {speaker: spans[0] for speaker, spans in refs.items() if spans}
 
 
 def _next_profile_id(existing_ids: set[str]) -> str:
@@ -137,8 +171,14 @@ def _speaker_embeddings_from_audio(
     *,
     hf_token: str,
     device: str,
+    min_reference_segment_s: float,
+    max_reference_segments: int,
 ) -> dict[str, np.ndarray]:
-    refs = select_longest_clean_segments(diarization_speakers)
+    refs = select_reference_segments(
+        diarization_speakers,
+        min_reference_segment_s=min_reference_segment_s,
+        max_reference_segments=max_reference_segments,
+    )
     if not refs:
         return {}
 
@@ -148,13 +188,28 @@ def _speaker_embeddings_from_audio(
     embed = _build_embedder(hf_token=hf_token, device=device)
 
     result: dict[str, np.ndarray] = {}
-    for local_speaker, (start, end) in refs.items():
-        s = max(0, int(start * sample_rate))
-        e = min(waveform.shape[1], int(end * sample_rate))
-        if e - s < int(_MIN_REFERENCE_SEGMENT_S * sample_rate):
+    for local_speaker, spans in refs.items():
+        weighted: list[tuple[np.ndarray, float]] = []
+        for start, end in spans:
+            s = max(0, int(start * sample_rate))
+            e = min(waveform.shape[1], int(end * sample_rate))
+            seg_s = (e - s) / float(sample_rate)
+            if seg_s < max(0.1, float(min_reference_segment_s)):
+                continue
+            clip = waveform[:, s:e]
+            weighted.append((embed(clip, sample_rate), seg_s))
+        if not weighted:
             continue
-        clip = waveform[:, s:e]
-        result[local_speaker] = embed(clip, sample_rate)
+        if len(weighted) == 1:
+            result[local_speaker] = weighted[0][0]
+            continue
+        total_w = sum(w for _emb, w in weighted)
+        if total_w <= 0:
+            continue
+        avg = np.zeros_like(weighted[0][0], dtype=np.float32)
+        for emb, w in weighted:
+            avg += emb.astype(np.float32) * np.float32(w / total_w)
+        result[local_speaker] = avg.astype(np.float32)
     return result
 
 
@@ -184,6 +239,9 @@ def identify_speakers_from_profiles(
     device: str,
     profiles_path: Path,
     names_path: Path,
+    similarity_threshold: float = _SIMILARITY_THRESHOLD,
+    min_reference_segment_s: float = _MIN_REFERENCE_SEGMENT_S,
+    max_reference_segments: int = _MAX_REFERENCE_SEGMENTS,
 ) -> dict[str, str]:
     """Return mapping from local diarization speaker IDs to display names."""
     if not diarization_speakers:
@@ -195,18 +253,40 @@ def identify_speakers_from_profiles(
         diarization_speakers,
         hf_token=hf_token,
         device=device,
+        min_reference_segment_s=min_reference_segment_s,
+        max_reference_segments=max_reference_segments,
     )
     if not local_embeddings:
         return {}
 
     local_to_profile: dict[str, str] = {}
+    used_profiles: set[str] = set()
+    candidate_matches: list[tuple[float, str, str]] = []
     for local_speaker, emb in local_embeddings.items():
-        profile_id = _match_or_create_profile_id(emb, profiles)
+        for profile_id, profile_emb in profiles.items():
+            score = _cosine_similarity(emb, profile_emb)
+            if score >= float(similarity_threshold):
+                candidate_matches.append((score, local_speaker, profile_id))
+    candidate_matches.sort(key=lambda it: it[0], reverse=True)
+
+    for _score, local_speaker, profile_id in candidate_matches:
+        if local_speaker in local_to_profile or profile_id in used_profiles:
+            continue
+        local_to_profile[local_speaker] = profile_id
+        used_profiles.add(profile_id)
+
+    for local_speaker in sorted(local_embeddings):
+        if local_speaker in local_to_profile:
+            continue
+        new_id = _next_profile_id(set(profiles.keys()) | set(local_to_profile.values()))
+        local_to_profile[local_speaker] = new_id
+
+    for local_speaker, profile_id in local_to_profile.items():
+        emb = local_embeddings[local_speaker]
         if profile_id in profiles:
             profiles[profile_id] = ((profiles[profile_id] + emb) / 2.0).astype(np.float32)
         else:
             profiles[profile_id] = emb.astype(np.float32)
-        local_to_profile[local_speaker] = profile_id
 
     save_profiles(profiles_path, profiles)
 

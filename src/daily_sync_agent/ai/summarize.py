@@ -16,7 +16,8 @@ _SYSTEM = (
     "You summarize spoken content in exactly one short paragraph. "
     "CRITICAL language rule: write your entire answer ONLY in the same language as the transcript. "
     "Do not translate into English or any other language—match the transcript language only. "
-    "Be neutral and concise. If the transcript is empty, say so in that same language."
+    "Be neutral and concise. Include key decisions, concrete actions, and owners when explicitly present. "
+    "If ownership is unclear, say so briefly. If the transcript is empty, say so in that same language."
 )
 
 _SYSTEM_DAILY_SCRUM = (
@@ -32,9 +33,13 @@ _SYSTEM_DAILY_SCRUM = (
     "otherwise infer from the transcript or state that the date is unknown.\n"
     "3) Number of participants in the call.\n"
     "4) Topics — bullet list of the main discussion topics.\n"
-    "5) Possible solutions — bullet list of solutions, decisions, or agreements mentioned.\n"
-    "6) Tasks — bullet list of concrete action items, tasks, or follow-ups, and for each item name the responsible person/speaker when known.\n"
-    "7) Problems and blockers — bullet list of impediments, blockers, or unresolved problems; if none, say so clearly.\n\n"
+    "5) Decisions and agreements — bullet list of explicit decisions, commitments, or agreements.\n"
+    "6) Action items (owner-centric) — bullet list. For each item include: task, owner, and due/time hint. "
+    "If owner or due/time hint is unknown, write 'unknown' explicitly.\n"
+    "7) Owners and responsibilities — compact bullet list mapping each known speaker/person to what they own.\n"
+    "8) Problems and blockers — bullet list of impediments, blockers, or unresolved problems; if none, say so clearly.\n\n"
+    "Action extraction rules: capture actionable verbs and follow-ups; preserve relative time hints exactly as spoken "
+    "(e.g. today, tomorrow, this week, next sprint); do not invent owners, dates, or tasks.\n\n"
     "Be factual; only include items supported by the transcript. If a section has nothing relevant, state that briefly."
 )
 
@@ -73,7 +78,8 @@ def build_summary_user_content(
         else:
             block += (
                 "\n\n[Required] Follow the section structure from the system instructions. "
-                "Write every section in the same language as the transcript."
+                "Write every section in the same language as the transcript. "
+                "Action items must include task + owner + due/time hint; use 'unknown' when missing."
             )
         return block
 
@@ -86,7 +92,8 @@ def build_summary_user_content(
     else:
         block += (
             "\n\n[Required] Write the summary only in the same language as the transcript above. "
-            "Do not switch to English unless the transcript itself is English."
+            "Do not switch to English unless the transcript itself is English. "
+            "When present in transcript, mention key decisions, action items, and owners in that one paragraph."
         )
     return block
 
