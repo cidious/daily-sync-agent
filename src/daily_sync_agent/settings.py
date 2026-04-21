@@ -89,9 +89,9 @@ class AppConfig:
     # Optional cross-session speaker identification using saved embeddings + editable names.
     identify_speakers: bool = False
     # P3 speaker-ID quality knobs (used by speaker profiling/matching).
-    speaker_id_similarity_threshold: float = 0.72
-    speaker_id_min_ref_segment_s: float = 2.0
-    speaker_id_max_ref_segments: int = 3
+    speaker_id_similarity_threshold: float = 0.65   # lowered from 0.72: cross-session same-speaker scores ~0.65-0.85
+    speaker_id_min_ref_segment_s: float = 3.0        # raised from 2.0: longer clips → more stable embeddings
+    speaker_id_max_ref_segments: int = 5             # raised from 3: more segments averaged reduces noise
     ffmpeg_fps: int = 25
     display: str = ":0"
     # P1 reliability: disk space guard before recording
@@ -143,9 +143,9 @@ class AppConfig:
         cur["unload_models_after_task"] = _as_bool(cur.get("unload_models_after_task"), False)
         cur["diarize_speakers"] = _as_bool(cur.get("diarize_speakers"), False)
         cur["identify_speakers"] = _as_bool(cur.get("identify_speakers"), False)
-        cur["speaker_id_similarity_threshold"] = _as_float(cur.get("speaker_id_similarity_threshold"), 0.72)
-        cur["speaker_id_min_ref_segment_s"] = _as_float(cur.get("speaker_id_min_ref_segment_s"), 2.0)
-        cur["speaker_id_max_ref_segments"] = _as_int(cur.get("speaker_id_max_ref_segments"), 3)
+        cur["speaker_id_similarity_threshold"] = _as_float(cur.get("speaker_id_similarity_threshold"), 0.65)
+        cur["speaker_id_min_ref_segment_s"] = _as_float(cur.get("speaker_id_min_ref_segment_s"), 3.0)
+        cur["speaker_id_max_ref_segments"] = _as_int(cur.get("speaker_id_max_ref_segments"), 5)
 
         sm = str(cur.get("summary_mode") or "general").strip().lower()
         if sm not in ("general", "daily_scrum"):

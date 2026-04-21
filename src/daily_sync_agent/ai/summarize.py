@@ -227,6 +227,25 @@ def _merge_ollama_options(payload: dict, extra_options: dict[str, int]) -> dict:
     return out
 
 
+def _is_qwen3_model(model_name: str) -> bool:
+    """Qwen3 models ship with an internal thinking chain that consumes num_predict tokens before the visible reply."""
+    name = (model_name or "").lower()
+    return "qwen3" in name
+
+
+def _apply_qwen3_no_think(payload: dict, model_name: str) -> dict:
+    """Disable Qwen3 extended thinking to avoid hidden tokens eating into num_predict budget."""
+    if not _is_qwen3_model(model_name):
+        return payload
+    out = dict(payload)
+    opts = dict(out.get("options") or {})
+    if "think" not in opts:
+        opts["think"] = False
+        logger.debug("Qwen3 model detected (%r): injecting options.think=false to save token budget", model_name)
+    out["options"] = opts
+    return out
+
+
 def _ollama_model_names(tags_json: dict) -> list[str]:
     return [m["name"] for m in tags_json.get("models", []) if m.get("name")]
 
@@ -305,7 +324,9 @@ def summarize_text(
         event_date_hint=event_date_hint,
     )
     full_prompt = f"{system}\n\n{user_block}"
-    token_out = 1024 if mode == "daily_scrum" else 512
+    # daily_scrum has 8 structured sections; 1024/512 is too small — raises risk of mid-sentence truncation.
+    # Qwen3 "thinking" mode also burns tokens before the visible answer starts.
+    token_out = 3000 if mode == "daily_scrum" else 1200
     logger.debug(
         "Summary generation started base=%s configured_model=%s mode=%s timeout_s=%.1f unload_after_task=%s transcript_chars=%d",
         base,
@@ -353,17 +374,20 @@ def summarize_text(
             "Ollama /api/chat",
             f"{base}/api/chat",
             _with_ollama_keepalive(
-                _merge_ollama_options(
-                    {
-                        "model": resolved_model,
-                        "messages": [
-                            {"role": "system", "content": system},
-                            {"role": "user", "content": user_block},
-                        ],
-                        "stream": False,
-                        "options": {"num_predict": token_out, "temperature": 0.3},
-                    },
-                    extra,
+                _apply_qwen3_no_think(
+                    _merge_ollama_options(
+                        {
+                            "model": resolved_model,
+                            "messages": [
+                                {"role": "system", "content": system},
+                                {"role": "user", "content": user_block},
+                            ],
+                            "stream": False,
+                            "options": {"num_predict": token_out, "temperature": 0.3},
+                        },
+                        extra,
+                    ),
+                    resolved_model,
                 ),
                 unload_model_after_task=unload_model_after_task,
             ),
@@ -373,14 +397,17 @@ def summarize_text(
             "Ollama /api/generate",
             f"{base}/api/generate",
             _with_ollama_keepalive(
-                _merge_ollama_options(
-                    {
-                        "model": resolved_model,
-                        "prompt": full_prompt,
-                        "stream": False,
-                        "options": {"temperature": 0.3, "num_predict": token_out},
-                    },
-                    extra,
+                _apply_qwen3_no_think(
+                    _merge_ollama_options(
+                        {
+                            "model": resolved_model,
+                            "prompt": full_prompt,
+                            "stream": False,
+                            "options": {"temperature": 0.3, "num_predict": token_out},
+                        },
+                        extra,
+                    ),
+                    resolved_model,
                 ),
                 unload_model_after_task=unload_model_after_task,
             ),

@@ -11,9 +11,33 @@ from daily_sync_agent.ai.diarize import _load_audio_as_waveform
 
 logger = logging.getLogger(__name__)
 
-_MIN_REFERENCE_SEGMENT_S = 2.0
-_SIMILARITY_THRESHOLD = 0.72
-_MAX_REFERENCE_SEGMENTS = 3
+_MIN_REFERENCE_SEGMENT_S = 3.0   # raised: longer clips → more stable embeddings
+_SIMILARITY_THRESHOLD = 0.65     # lowered: same speaker cross-session scores range 0.65-0.85
+_MAX_REFERENCE_SEGMENTS = 5      # raised: more segments to average reduces noise
+_PROFILE_EMA_ALPHA = 0.2         # weight given to the *new* session when updating a profile (0=never update, 1=replace)
+
+
+def _l2_normalize(v: np.ndarray) -> np.ndarray:
+    """Return L2-normalized copy of a vector. Returns zeros on zero-norm input."""
+    norm = float(np.linalg.norm(v))
+    if norm <= 0.0:
+        return np.zeros_like(v, dtype=np.float32)
+    return (v / norm).astype(np.float32)
+
+
+def _update_profile_ema(
+    existing: np.ndarray,
+    new_emb: np.ndarray,
+    alpha: float = _PROFILE_EMA_ALPHA,
+) -> np.ndarray:
+    """Exponential moving average update, then L2-normalize.
+
+    alpha controls weight of the incoming session:
+    - alpha=0.2 means 20% new, 80% existing → stable, slow drift
+    - Normalize afterward so cosine similarity stays well-calibrated.
+    """
+    blended = (1.0 - alpha) * existing.astype(np.float32) + alpha * new_emb.astype(np.float32)
+    return _l2_normalize(blended)
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -259,12 +283,19 @@ def identify_speakers_from_profiles(
     if not local_embeddings:
         return {}
 
+    # Normalize query embeddings before matching — stored profiles are on the unit sphere.
+    local_embeddings = {k: _l2_normalize(v) for k, v in local_embeddings.items()}
+
     local_to_profile: dict[str, str] = {}
     used_profiles: set[str] = set()
     candidate_matches: list[tuple[float, str, str]] = []
     for local_speaker, emb in local_embeddings.items():
         for profile_id, profile_emb in profiles.items():
             score = _cosine_similarity(emb, profile_emb)
+            logger.debug(
+                "Speaker ID score local=%s profile=%s score=%.4f threshold=%.4f match=%s",
+                local_speaker, profile_id, score, float(similarity_threshold), score >= float(similarity_threshold),
+            )
             if score >= float(similarity_threshold):
                 candidate_matches.append((score, local_speaker, profile_id))
     candidate_matches.sort(key=lambda it: it[0], reverse=True)
@@ -284,9 +315,11 @@ def identify_speakers_from_profiles(
     for local_speaker, profile_id in local_to_profile.items():
         emb = local_embeddings[local_speaker]
         if profile_id in profiles:
-            profiles[profile_id] = ((profiles[profile_id] + emb) / 2.0).astype(np.float32)
+            # EMA update + L2-normalize to prevent cosine similarity drift over sessions.
+            profiles[profile_id] = _update_profile_ema(profiles[profile_id], emb)
         else:
-            profiles[profile_id] = emb.astype(np.float32)
+            # New profile: store as L2-normalized embedding so all profiles are on the unit sphere.
+            profiles[profile_id] = _l2_normalize(emb)
 
     save_profiles(profiles_path, profiles)
 
