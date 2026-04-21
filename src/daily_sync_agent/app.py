@@ -793,7 +793,8 @@ class TrayApplication(QWidget):
             QSystemTrayIcon.MessageIcon.Information,
             5000,
         )
-        self._tray.setIcon(icon_processing())
+        if self._recording is None:
+            self._tray.setIcon(icon_processing())
         # P1: write .processing sentinel so crash resume detects incomplete sessions
         try:
             (session / ".processing").touch()
@@ -822,7 +823,8 @@ class TrayApplication(QWidget):
         except OSError:
             pass
         self._ai_thread = None
-        self._tray.setIcon(icon_idle())
+        if self._recording is None:
+            self._tray.setIcon(icon_idle())
         self._tray.showMessage(
             "Done",
             f"Saved transcript and summary in {sd}" if did_summarize else f"Saved transcript in {sd} (summary disabled)",
@@ -840,7 +842,8 @@ class TrayApplication(QWidget):
             except OSError:
                 pass
         self._ai_thread = None
-        self._tray.setIcon(icon_idle())
+        if self._recording is None:
+            self._tray.setIcon(icon_idle())
         QMessageBox.critical(None, "AI pipeline failed", err[:4000])
         self._rebuild_menu()
         self._try_start_ai_worker()

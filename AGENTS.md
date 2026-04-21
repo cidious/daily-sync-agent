@@ -84,6 +84,17 @@
 - Run tests: `python -m unittest discover -s tests -v` (covers platform detection, window picking on both platforms, audio devices, ffmpeg commands, diarization, speaker ID, low-VRAM mode, optional summaries, and logging behavior).
 - Add Windows support tests: use `@unittest.skipUnless(platform.is_windows())` and `@unittest.skipUnless(platform.is_linux())` decorators in test files.
 
+## Pending roadmap (P5)
+- Detailed P5.1..P5.6 planning/execution lives in `IMPLEMENTATION_CHECKLIST.md` (single source of truth for pending tasks).
+- Keep `AGENTS.md` at high level; avoid duplicating per-item acceptance details here.
+- P5 focus areas:
+  - `P5.1`: cross-platform CI baseline (Linux + Windows validation)
+  - `P5.2`: reproducible dependency/build profiles
+  - `P5.3`: Linux packaging/release path
+  - `P5.4`: Windows installer/release hardening
+  - `P5.5`: release artifacts, checksums, and provenance
+  - `P5.6`: distribution docs and support matrix upkeep
+
 ## Change safety checklist for agents
 - If touching recording: verify ffmpeg args still produce both `recording.mkv` and `recording.flac` on both Linux and Windows.
 - If touching summarization: keep language-matching constraints and multi-endpoint fallback behavior.

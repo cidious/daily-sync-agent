@@ -162,6 +162,70 @@
 
 ---
 
+## ⏳ Phase 5: Distribution & Platform Strategy (PENDING)
+
+### P5.1 Cross-platform CI baseline (Linux + Windows)
+- Status: pending
+- Owner: TBD
+- Blocked by: confirm required smoke-test scope
+- Acceptance criteria:
+  - [ ] GitHub Actions runs `python -m unittest discover -s tests -v` on Linux and Windows
+  - [ ] Platform-gated tests use `@unittest.skipUnless(...)` and pass cleanly per OS
+  - [ ] CI uploads logs/artifacts for failed jobs for debugging
+- Notes: Keep initial workflow minimal (test + lint + artifact upload), then expand.
+
+### P5.2 Reproducible dependency/build profiles
+- Status: pending
+- Owner: TBD
+- Blocked by: final dependency split review (`windows`, `diarization`, base)
+- Acceptance criteria:
+  - [ ] Installation docs define stable env setup for Linux and Windows
+  - [ ] Optional extras are validated in CI for import/runtime sanity
+  - [ ] Dependency updates do not break default install path (`pip install -e .`)
+- Notes: Prioritize predictable setup over aggressive pinning.
+
+### P5.3 Linux packaging/release path
+- Status: pending
+- Owner: TBD
+- Blocked by: choose first target package format(s)
+- Acceptance criteria:
+  - [ ] Packaging docs define supported Linux distro/repo strategy
+  - [ ] Packaging flow preserves tray launch + desktop entry behavior
+  - [ ] Install/uninstall instructions are verified on at least one target distro
+- Notes: Keep X11-only GUI constraint explicit in packaged docs.
+
+### P5.4 Windows installer/release hardening
+- Status: pending
+- Owner: TBD
+- Blocked by: installer technology selection (`.msi`/WiX vs alternative)
+- Acceptance criteria:
+  - [ ] Installer supports add/remove programs entry and clean uninstall
+  - [ ] Installer keeps FFmpeg/runtime dependency checks explicit
+  - [ ] Upgrade path from an older app version is validated
+- Notes: Reuse existing PowerShell install script as baseline behavior reference.
+
+### P5.5 Release artifacts, checksums, and provenance
+- Status: pending
+- Owner: TBD
+- Blocked by: decide release channel (GitHub Releases only vs additional mirrors)
+- Acceptance criteria:
+  - [ ] Release process produces versioned artifacts for each supported platform
+  - [ ] Checksums are generated and published with release notes
+  - [ ] Build provenance/source commit is recorded for each release artifact
+- Notes: Keep process simple and auditable before adding signing complexity.
+
+### P5.6 Distribution docs and support matrix upkeep
+- Status: pending
+- Owner: TBD
+- Blocked by: finalize minimum support policy (OS versions + GPU expectations)
+- Acceptance criteria:
+  - [ ] `README.md` and platform docs reflect current support matrix and limits
+  - [ ] Troubleshooting section covers top install/run failures by platform
+  - [ ] Docs link directly to canonical install + debug-log locations
+- Notes: Keep docs aligned with actual tested paths; avoid speculative platform claims.
+
+---
+
 ## 📋 Files Summary
 
 ### New Files (6)
@@ -264,4 +328,3 @@
 **Status**: Phase 1 (MVP) ✅ COMPLETE  
 **Last Updated**: 2026-04-15  
 **Ready For**: Phase 2 Development / Review / Testing
-
