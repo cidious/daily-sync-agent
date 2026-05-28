@@ -89,7 +89,7 @@ class AppConfig:
     # Optional cross-session speaker identification using saved embeddings + editable names.
     identify_speakers: bool = False
     # P3 speaker-ID quality knobs (used by speaker profiling/matching).
-    speaker_id_similarity_threshold: float = 0.65   # lowered from 0.72: cross-session same-speaker scores ~0.65-0.85
+    speaker_id_similarity_threshold: float = 0.6   # lowered from 0.72: cross-session same-speaker scores ~0.65-0.85
     speaker_id_min_ref_segment_s: float = 3.0        # raised from 2.0: longer clips → more stable embeddings
     speaker_id_max_ref_segments: int = 5             # raised from 3: more segments averaged reduces noise
     ffmpeg_fps: int = 25

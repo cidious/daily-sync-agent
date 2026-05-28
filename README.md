@@ -66,7 +66,7 @@ For long transcript summaries (around **32k tokens**), use the helper script:
 What it does:
 - Detects GPU presence and VRAM (`nvidia-smi` / `rocm-smi`, else CPU-only mode).
 - Chooses a best-fit model tier for summarization from one family (`qwen`, `gemma3`, `mistral-small`, `mistral-nemo`, `llama`) and defaults to `qwen` for `auto`.
-- Generates a tuned `Modelfile` with `num_ctx`, `num_gpu`, and generation parameters.
+- Generates a `Modelfile` with summarization generation parameters and context defaults.
 - Pulls the chosen base model and creates a local alias (`daily-sync-summary` by default).
 
 Useful flags:
@@ -86,6 +86,26 @@ Exact app settings recommended for this project after install:
 - `summarize_transcript`: `true`
 - `transcribe_speech`: `true`
 - `unload_models_after_task`: `true` on small GPUs (typically under 16 GB VRAM), otherwise `false`
+
+### Tune an existing Modelfile for your current GPU (recommended)
+
+If your custom Ollama model is partially CPU-offloaded (high CPU, low GPU usage), tune the Modelfile with:
+
+```bash
+python3 scripts/tune_modelfile_for_gpu.py --modelfile Modelfile.daily-sync-summarizer --dry-run
+python3 scripts/tune_modelfile_for_gpu.py --modelfile Modelfile.daily-sync-summarizer
+```
+
+What this script does:
+- Probes context sizes against your local Ollama runtime and picks the highest `num_ctx` with best GPU residency (`/api/ps` -> `size_vram` vs `size`).
+- Removes `PARAMETER num_gpu` from the Modelfile (this value is layer-offload related, not VRAM in GB, and can accidentally force CPU offload).
+- Creates a timestamped backup before writing (unless `--no-backup` is used).
+
+After tuning, rebuild your alias model:
+
+```bash
+ollama create daily-sync-summary -f Modelfile.daily-sync-summarizer
+```
 
 ### System packages (automated)
 

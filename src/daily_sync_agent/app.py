@@ -1001,8 +1001,6 @@ class TrayApplication(QWidget):
             chk_diarize.setEnabled(st["diarize_enabled"])
             e_hf_token.setEnabled(st["hf_token_enabled"])
             chk_identify.setEnabled(st["identify_enabled"])
-            if not st["identify_enabled"]:
-                chk_identify.setChecked(False)
             e_ollama.setEnabled(st["summarize_enabled"])
             combo_model.setEnabled(st["summarize_enabled"])
             btn_refresh_models.setEnabled(st["summarize_enabled"])
